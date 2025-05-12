@@ -7,19 +7,23 @@ import math
 pygame.font.init()
 default_font = pygame.font.Font(None, 32)
 
+pygame.init()
+screen = pygame.display.set_mode((800, 800))
+
 # directory where your ‘assets’ folder lives (next to RacingAI.py)
 ASSETS_DIR = os.path.join(os.path.dirname(__file__), 'assets')
+_sheet_raw = pygame.image.load(os.path.join(ASSETS_DIR, 'TrackPieces.png'))
+sheet   = _sheet_raw.convert_alpha()
+tile_w  = sheet.get_width()  // 3
+tile_h  = sheet.get_height() // 3
 
-# after loading asset_images, add:
-sheet = pygame.image.load(os.path.join(ASSETS_DIR, 'road_tiles.png')).convert_alpha()
-tile_w = sheet.get_width() // 3
-tile_h = sheet.get_height() // 2
+# this road_tiles list is now global to the module
+road_tiles = [
+    sheet.subsurface(pygame.Rect(col*tile_w, row*tile_h, tile_w, tile_h)).copy()
+    for row in range(3) for col in range(3)
+]
 
-# indices: 0=no walls, 1=one wall, 2=opposite walls,
-# 3=adjacent walls, 4=90° curve, 5=45° curve
-road_tiles = [sheet.subsurface(pygame.Rect(col*tile_w, row*tile_h, tile_w, tile_h)).copy()
-              for row in range(2) for col in range(3)]
-
+CAR_IMAGE_RAW = pygame.image.load(os.path.join(ASSETS_DIR, 'CarSprite.png')).convert_alpha()
 
 def get_text_input(screen, prompt, font, box_rect, text_color=(255,255,255), box_color=(0,0,0), border_color=(255,255,255), border_width=2):
     """
@@ -75,8 +79,13 @@ class Grid:
         grid_y = y // self.cell_size
         return grid_x, grid_y
 
-    def place_block(self, x, y, block):
-        self.grid[y][x] = block
+    def place_block(self, x, y, block, rotation=0):
+        """
+        x, y       — cell coordinates
+        block      — a pygame.Surface
+        rotation   — degrees to rotate that surface
+        """
+        self.grid[y][x] = (block, rotation)
 
     def remove_block(self, x, y):
         self.grid[y][x] = None
@@ -90,23 +99,68 @@ class Grid:
     def draw(self, screen):
         for y in range(self.size):
             for x in range(self.size):
-                rect = pygame.Rect(x * self.cell_size, y * self.cell_size, self.cell_size, self.cell_size)
+                # cell border
+                rect = pygame.Rect(
+                    x * self.cell_size,
+                    y * self.cell_size,
+                    self.cell_size,
+                    self.cell_size
+                )
                 pygame.draw.rect(screen, (200, 200, 200), rect, 1)
-                if self.grid[y][x]:
-                    pygame.draw.rect(screen, self.grid[y][x], rect)
+
+                block = self.grid[y][x]
+                if block:
+                    # unpack tuple or treat as no-rotation
+                    if isinstance(block, tuple):
+                        surf, rot = block
+                    else:
+                        surf, rot = block, 0
+
+                    # scale then rotate around center
+                    tile = pygame.transform.scale(surf, (self.cell_size, self.cell_size))
+                    if rot:
+                        tile = pygame.transform.rotate(tile, rot)
+
+                    # center the rotated tile in the cell
+                    blit_rect = tile.get_rect(center=(
+                        x * self.cell_size + self.cell_size/2,
+                        y * self.cell_size + self.cell_size/2
+                    ))
+                    screen.blit(tile, blit_rect.topleft)
+
+
 
 class TrackEditor:
     def __init__(self, screen):
         self.screen = screen
         self.screen_width = screen.get_width()
         self.screen_height = screen.get_height()
-        self.grid_pixel_size = min(self.screen_width, self.screen_height) - 100  # Leave some space for UI
+
+        # reserve bottom UI panel for palette
+        self.palette_height   = 80
+        # grid area height = screen height minus palette
+        self.grid_pixel_size = min(self.screen_width - self.palette_height, self.screen_height - self.palette_height)
+
         self.clock = pygame.time.Clock()
         self.font = pygame.font.Font(None, 24)
     
         self.grid_size = self.get_grid_size()
         self.init_grid()
+
+        self.selected_rotation = 0   # current rotation in degrees
+
+
+        # after loading asset_images, add:
+        sheet = pygame.image.load(os.path.join(ASSETS_DIR, 'TrackPieces.png')).convert_alpha()
+        tile_w = sheet.get_width() // 3
+        tile_h = sheet.get_height() // 3
+
+        # indices: 0=no walls, 1=one wall, 2=opposite walls,
+        # 3=adjacent walls, 4=90° curve, 5=45° curve
+        road_tiles = [sheet.subsurface(pygame.Rect(col*tile_w, row*tile_h, tile_w, tile_h)).copy()
+                    for row in range(3) for col in range(3)]
     
+        """
         self.blocks = [
             (255, 0, 0),    # Red
             (0, 255, 0),    # Green
@@ -114,8 +168,17 @@ class TrackEditor:
             (255, 255, 0),  # Yellow
             (255, 0, 255),  # Magenta
         ]
+        """
+        self.blocks = road_tiles # Use the loaded road tiles
+
         self.selected_block = self.blocks[0]  # Start with the first block selected
-        self.palette_rect = pygame.Rect(self.screen_width - 80, 0, 80, self.screen_height)
+        # place palette panel at bottom, full width
+        self.palette_rect   = pygame.Rect(
+           0,
+           self.grid_pixel_size,
+           self.screen_width,
+           self.palette_height
+        )
 
     def init_grid(self):
         self.grid = Grid(self.grid_size, self.grid_pixel_size)
@@ -144,12 +207,17 @@ class TrackEditor:
                         self.load_track()
                     elif event.key == pygame.K_ESCAPE:
                         return "MENU"
+                    elif event.key == pygame.K_r and self.selected_block:
+                        # rotate by 90° each press
+                        self.selected_rotation = (self.selected_rotation + 90) % 360
+
 
             self.screen.fill((200, 200, 200))  # Light gray background
             
             # Calculate the position to center the grid
-            grid_x = (self.screen_width - self.grid_pixel_size) // 2
-            grid_y = (self.screen_height - self.grid_pixel_size) // 2
+            # center horizontally, top‐align so palette sits below
+            grid_x = (self.screen_width  - self.grid_pixel_size) // 2
+            grid_y = 0
             
             # Create a surface for the grid
             grid_surface = pygame.Surface((self.grid_pixel_size, self.grid_pixel_size))
@@ -169,38 +237,66 @@ class TrackEditor:
             # Handle palette click
             self.handle_palette_click(pos)
         else:
-            grid_x = (self.screen_width - self.grid_pixel_size) // 2
-            grid_y = (self.screen_height - self.grid_pixel_size) // 2
+            grid_x = (self.screen_width  - self.grid_pixel_size) // 2
+            grid_y = 0
             
             if grid_x <= pos[0] < grid_x + self.grid_pixel_size and grid_y <= pos[1] < grid_y + self.grid_pixel_size:
                 cell_x, cell_y = self.grid.get_cell(pos[0] - grid_x, pos[1] - grid_y)
                 if 0 <= cell_x < self.grid_size and 0 <= cell_y < self.grid_size:
                     if button == 1:  # Left click
                         if self.selected_block:
-                            self.grid.place_block(cell_x, cell_y, self.selected_block)
+                            self.grid.place_block(cell_x, cell_y, self.selected_block, self.selected_rotation)
                         else: # Remove block
                             self.grid.remove_block(cell_x, cell_y)
                     elif button == 3:  # Right click
                         self.grid.remove_block(cell_x, cell_y)
 
     def handle_palette_click(self, pos):
-        index = (pos[1] - 20) // 40
-        if 0 <= index < len(self.blocks):
+        x, y = pos
+        if not self.palette_rect.collidepoint(x, y):
+            return
+
+        total      = len(self.blocks)
+        slot_width = self.palette_rect.width // total
+        rel_x      = x - self.palette_rect.x
+        index      = rel_x // slot_width
+
+        if 0 <= index < total:
             self.selected_block = self.blocks[index]
-        elif index == len(self.blocks):
-            self.selected_block = None  # Eraser
+        # no eraser slot any more
+
 
     def draw_block_palette(self):
-        pygame.draw.rect(self.screen, (255, 255, 255), self.palette_rect)
-        for i, color in enumerate(self.blocks):
-            rect = pygame.Rect(self.screen_width - 60, 20 + i * 40, 40, 30)
-            pygame.draw.rect(self.screen, color, rect)
-            if color == self.selected_block:
-                pygame.draw.rect(self.screen, (255, 255, 255), rect, 2)
-        rect = pygame.Rect(self.screen_width - 60, 20 + len(self.blocks) * 40, 40, 30)
-        pygame.draw.rect(self.screen, (0, 0, 0), rect)  # Eraser
-        if self.selected_block is None:
-            pygame.draw.rect(self.screen, (255, 255, 255), rect, 2)
+        # background for palette
+        pygame.draw.rect(self.screen, (245, 245, 245), self.palette_rect)
+
+        # compute square slot size & horizontal layout
+        total      = len(self.blocks)
+        slot_width = self.palette_rect.width // total
+        padding    = 8
+        slot_size  = self.palette_rect.height - padding*2
+
+        for i, tile in enumerate(self.blocks):
+            # slot rect in the palette
+            x0 = self.palette_rect.x + i * slot_width + padding
+            y0 = self.palette_rect.y + padding
+            rect = pygame.Rect(x0, y0, slot_size, slot_size)
+
+            # choose surf → rotate if it’s the selected one
+            if tile == self.selected_block:
+                surf = pygame.transform.rotate(tile, self.selected_rotation)
+            else:
+                surf = tile
+
+            # scale to fit the square slot
+            tile_surf = pygame.transform.scale(surf, (slot_size, slot_size))
+            self.screen.blit(tile_surf, rect.topleft)
+
+            # highlight selected
+            if tile == self.selected_block:
+                pygame.draw.rect(self.screen, (255, 255, 175), rect, 2)
+
+
 
     def draw_instructions(self):
         text = self.font.render("Left-click to place/remove blocks", True, (0, 0, 0))
@@ -226,7 +322,9 @@ class TrackEditor:
                 for x in range(self.grid_size):
                     block = self.grid.get_block(x, y)
                     if block:
-                        writer.writerow([x, y, block])
+                        surf, rot = block                      # unpack Surface & rotation
+                        idx     = self.blocks.index(surf)      # find its palette index
+                        writer.writerow([x, y, idx, rot])
 
     def load_track(self):
         #file_name = input("Enter file name: ")
@@ -237,11 +335,18 @@ class TrackEditor:
                 reader = csv.reader(file)
                 # Read the grid size from the first row
                 self.grid_size = int(next(reader)[0])
+                print(f"Loaded grid size: {self.grid_size}")
                 # Reinitialize the grid with the new size
                 self.init_grid()
                 for row in reader:
-                    x, y, block = row
-                    self.grid.place_block(int(x), int(y), tuple(map(int, block[1:-1].split(','))))
+                    x_str, y_str, idx_str, rot_str = row
+                    x    = int(x_str)
+                    y    = int(y_str)
+                    idx  = int(idx_str)
+                    rot  = int(rot_str)
+                    surf = self.blocks[idx]               # look up the Surface
+                    self.grid.place_block(x, y, (surf, rot))
+
             return self.grid  # Return the loaded grid
         else:
             print("File not found!")
@@ -265,10 +370,10 @@ class Car:
         # physics parameters (tweak to taste)
         self.wheel_base = 50          # distance between axles in pixels
         self.max_steer = math.radians(30)  # max front‐wheel angle (±30°)
-        self.steer_speed = math.radians(240)  # how fast you turn the wheels (rad/sec)
+        self.steer_speed = math.radians(200)  # how fast you turn the wheels (rad/sec)
         self.mass = 1200             # mass in arbitrary units
         self.Cd = 0.425              # drag coefficient
-        self.Crr = 12.8              # rolling resistance coeff
+        self.Crr = 2000              # rolling resistance coeff
 
         # dynamic state
         self.velocity = 0.0          # forward speed (px/sec)
@@ -280,8 +385,8 @@ class Car:
         self.brake_input = 0.0       # in [0..1]
 
         # maximum longitudinal forces (engine drives forward, brakes drive backward)
-        self.max_engine_force = 500000.0    # adjust to taste
-        self.max_brake_force  = -1000000.0   # negative so braking produces a backward force
+        self.max_engine_force = 1500000.0    # adjust to taste
+        self.max_brake_force  = -2000000.0   # negative so braking produces a backward force
 
 
 
@@ -352,19 +457,24 @@ class Car:
 
 
     def draw(self, screen):
-        # Create a surface for the car
-        car_surface = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
-        pygame.draw.rect(car_surface, self.color, (0, 0, self.width, self.height))
-        
-        # Rotate the car surface
-        rotated_car = pygame.transform.rotate(car_surface, self.angle)
-        
-        # Get the rect of the rotated car and set its center
-        rect = rotated_car.get_rect(center=(self.x, self.y))
-        
-        # Draw the rotated car on the screen
-        screen.blit(rotated_car, rect.topleft)
-        self.collision_detector.draw_debug(screen)
+        # 1) scale the raw sprite to your car’s logical size
+        sprite = pygame.transform.scale(
+            CAR_IMAGE_RAW,
+            (int(self.width), int(self.height))
+        )
+
+        # 2) rotate around its center
+        rotated = pygame.transform.rotate(sprite, self.angle)
+
+        # 3) get its rect and center it at (self.x, self.y)
+        rect = rotated.get_rect(center=(self.x, self.y))
+
+        # 4) blit to the screen
+        screen.blit(rotated, rect.topleft)
+
+        # draw your collision listeners as before
+        #self.collision_detector.draw_debug(screen)
+
 
 class Track:
     def __init__(self, name):
@@ -391,12 +501,18 @@ class Track:
                 self.grid_size = int(next(reader)[0])
                 self.block_size = self.screen_size // self.grid_size
 
+                self.blocks = [] # Clear previous blocks
+
                 for row in reader:
-                    if len(row) == 3:
-                        x, y, color = int(row[0]), int(row[1]), eval(row[2])
-                        # originally: self.blocks.append((x, y, color))
-                        # now:
-                        self.blocks.append((x, y, tile_index, rotation_angle))
+                    # expect rows like: x, y, tileIndex, rotationDeg
+                    if len(row) == 4:
+                        x, y, idx, rot = map(int, row)
+                        self.blocks.append((x, y, idx, rot))
+                    # (optional) support old 3-column format:
+                    elif len(row) == 3:
+                        x, y, idx = map(int, row)
+                        self.blocks.append((x, y, idx, 0))
+
 
             print(f"Successfully loaded track '{file_name}' with {len(self.blocks)} blocks")
             print(f"Grid size: {self.grid_size}, Block size: {self.block_size}")
@@ -410,15 +526,27 @@ class Track:
         screen.fill((0, 200, 0))  # Green color
         
         for x, y, idx, rot in self.blocks:
-            img = road_tiles[idx]
-            # rotate returns a new surface
-            img_rot = pygame.transform.rotate(img, rot)
-            rect = img_rot.get_rect(center=(
+            # 1) pull the original sprite
+            tile = road_tiles[idx]
+
+            # 2) scale it down to your block size
+            tile = pygame.transform.scale(
+                tile,
+                (self.block_size, self.block_size)
+            )
+
+            # 3) then rotate (if rot ≠ 0)
+            if rot:
+                tile = pygame.transform.rotate(tile, rot)
+
+            # 4) compute its centered position in the grid cell
+            blit_rect = tile.get_rect(center=(
                 x * self.block_size + self.block_size/2,
                 y * self.block_size + self.block_size/2
             ))
-            screen.blit(img_rot, rect.topleft)
 
+            # 5) draw it
+            screen.blit(tile, blit_rect.topleft)
         
         # Draw grid lines for debugging
         
@@ -430,7 +558,7 @@ class Track:
     def get_car_size(self):
         # Make the car size proportional to the grid
         car_width = self.block_size * 0.5  # 50% of a block width
-        car_height = self.block_size * 0.25  # 25% of a block height
+        car_height = self.block_size * 0.32  # 25% of a block height
         return car_width, car_height
 
     def get_screen_size(self):
@@ -481,12 +609,17 @@ class CarCollisionDetector:
 
     def update_colors(self, colors):
         for name, color in colors.items():
-            if color != self.last_colors[name]:
+            if self.last_colors[name] is None:
+                self.last_colors[name] = (0, 0, 0)  # Initialize with black
+                continue
+            colorDifference = abs(color[0] - (self.last_colors[name])[0]) + abs(color[1] - (self.last_colors[name])[1]) + abs(color[2] - (self.last_colors[name])[2])
+            if colorDifference > 3:
                 print(f"Listener '{name}' detected new color: {color}")
                 self.last_colors[name] = color
     def update(self, colors):
         for name, color in colors.items():
-            if color != self.last_colors[name]:
+            colorDifference = abs(color[0] - self.last_colors[name][0]) + abs(color[1] - self.last_colors[name][1]) + abs(color[2] - self.last_colors[name][2])
+            if colorDifference > 3:
                 print(f"Listener '{name}' detected new color: {color}")
                 self.last_colors[name] = color
 
@@ -592,7 +725,8 @@ def drive_car(screen, track_name):
 
 def main():
     pygame.init()
-    screen = pygame.display.set_mode((800, 800))  # Start with a square screen
+    screen = pygame.display.set_mode((800, 800))
+
     pygame.display.set_caption("Racing Game")
     clock = pygame.time.Clock()
 
