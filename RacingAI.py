@@ -374,6 +374,8 @@ class Car:
         self.mass = 1200             # mass in arbitrary units
         self.Cd = 0.425              # drag coefficient
         self.Crr = 2000              # rolling resistance coeff
+        self.Crr_normal = self.Crr
+        self.Crr_offtrack = self.Crr * 5.0  # double rolling resistance when off‐road
 
         # dynamic state
         self.velocity = 0.0          # forward speed (px/sec)
@@ -387,8 +389,13 @@ class Car:
         # maximum longitudinal forces (engine drives forward, brakes drive backward)
         self.max_engine_force = 1500000.0    # adjust to taste
         self.max_brake_force  = -2000000.0   # negative so braking produces a backward force
+        
+        # for collision rollback
+        self.prev_x, self.prev_y, self.prev_yaw = x, y, self.yaw
 
-
+            # in Car.__init__:
+        self.reverse_delay  = 0.5   # seconds to wait at zero before reversing
+        self.time_since_stop = 0.0  # timer accumulator
 
     def accelerate(self):
         self.speed += self.acceleration
@@ -419,6 +426,9 @@ class Car:
         # no turning when speed == 0
 
     def update(self, dt):
+        # save previous in case we need to roll back on collision
+        self.prev_x, self.prev_y, self.prev_yaw = self.x, self.y, self.yaw
+
         # 1) Longitudinal forces
         # throttle produces forward force, brake_input produces backward force
         F_drive = self.throttle * self.max_engine_force  
@@ -474,6 +484,14 @@ class Car:
 
         # draw your collision listeners as before
         #self.collision_detector.draw_debug(screen)
+
+    def handle_collision(self):
+        # go back to last good state and stop
+        self.x, self.y, self.yaw = self.prev_x, self.prev_y, self.prev_yaw
+        self.velocity = 0
+        # keep public angle in sync
+        self.angle = -math.degrees(self.yaw)
+
 
 
 class Track:
@@ -617,6 +635,7 @@ class CarCollisionDetector:
                 print(f"Listener '{name}' detected new color: {color}")
                 self.last_colors[name] = color
     def update(self, colors):
+
         for name, color in colors.items():
             colorDifference = abs(color[0] - self.last_colors[name][0]) + abs(color[1] - self.last_colors[name][1]) + abs(color[2] - self.last_colors[name][2])
             if colorDifference > 3:
@@ -626,6 +645,36 @@ class CarCollisionDetector:
     def draw_debug(self, screen):
         for _, x, y in self.get_listener_positions():
             pygame.draw.circle(screen, (255, 0, 0), (x, y), 2)
+
+    def check_collision(self, colors):
+        """
+        Returns True if *any* listener sees grass (RGB exactly (0,200,0)),
+        meaning we’ve left the road.
+        """
+        for name, color in colors.items():
+            if color[:3] == (0, 200, 0):
+                print(f"Listener '{name}' detected grass color: {color}")
+                return True
+        return False
+    
+    def check_wall_collision(self, colors):
+        """
+        Returns True if any non-wheel listener (body) sees the wall color (255,0,0).
+        """
+        for name, col in colors.items():
+            if 'wheel' not in name and col[:3] == (255, 0, 0):
+                return True
+        return False
+
+    def any_wheel_offtrack(self, colors):
+        """
+        Returns True if any wheel listener sees grass (0,200,0).
+        """
+        for name, col in colors.items():
+            if 'wheel' in name and col[:3] == (0, 200, 0):
+                return True
+        return False
+
 
 class Menu:
     def __init__(self, screen):
@@ -683,42 +732,87 @@ def drive_car(screen, track_name):
         # compute dt (in seconds)
         dt = clock.tick(60) / 1000.0
 
-        keys = pygame.key.get_pressed()
         # throttle & brake as normalized inputs
-        car.throttle     = 1.0 if keys[pygame.K_UP] else 0.0
-        car.brake_input  = 1.0 if (keys[pygame.K_DOWN] and (car.velocity > 0)) else 0.0
-        if car.velocity < 0:
-            car.velocity = 0.0  # stop reversing if brake pressed
+        keys = pygame.key.get_pressed()
 
-        # steering target: left/right arrow sets desired wheel angle
+        # —— Reverse‐delay timer ——
+        if keys[pygame.K_DOWN] and car.velocity <= 0:
+            car.time_since_stop += dt
+        else:
+            car.time_since_stop = 0.0
+
+        # —— Throttle / Brake / Reverse logic ——
+        if keys[pygame.K_UP]:
+            car.throttle    = 1.0
+            car.brake_input = 0.0
+
+        elif keys[pygame.K_DOWN]:
+            if car.velocity > 0:
+                # braking while moving forward
+                car.throttle    = 0.0
+                car.brake_input = 1.0
+            elif car.time_since_stop >= car.reverse_delay:
+                # only go into reverse after delay
+                car.throttle    = -1.0
+                car.brake_input = 0.0
+            else:
+                # stopped but still within delay → no input
+                car.throttle    = 0.0
+                car.brake_input = 0.0
+
+        else:
+            # neither key → reset inputs
+            car.throttle    = 0.0
+            car.brake_input = 0.0
+
+
+        # steering target remains the same
         if keys[pygame.K_LEFT]:
             car.steer_target =  car.max_steer
         elif keys[pygame.K_RIGHT]:
             car.steer_target = -car.max_steer
         else:
-            car.steer_target = 0.0
+            car.steer_target =  0.0
+
 
         # update with real physics
-        car.update(dt)
-        
-        screen.fill((0, 200, 0))  # Fill the background with green
-        track.draw(screen)  # Draw the track
-        
-        # Get collision detector positions
-        listener_positions = car.collision_detector.get_listener_positions()
-        
-        # Check colors at listener positions
-        colors = {}
-        for name, x, y in listener_positions:
-            # Ensure the coordinates are within the screen bounds
-            x = max(0, min(int(x), screen.get_width() - 1))
-            y = max(0, min(int(y), screen.get_height() - 1))
-            colors[name] = screen.get_at((x, y))
-        
-        # Update collision detector with new colors
-        car.collision_detector.update_colors(colors)  # Changed from update to update_colors
-        
-        car.draw(screen)  # Draw the car
+        # 1) advance the car
+
+        # determine how many sub-steps so max move per step is ≤ half a cell
+        max_dist = track.block_size * 0.05
+        num_steps = max(1, int(abs(car.velocity * dt) / max_dist) + 1)
+        sub_dt = dt / num_steps
+
+        for _ in range(num_steps):
+            # advance by a fraction of dt
+            car.update(sub_dt)
+
+            # sample sensors
+            positions = car.collision_detector.get_listener_positions()
+            colors = {}
+            for name, x, y in positions:
+                x = max(0, min(x, screen.get_width()-1))
+                y = max(0, min(y, screen.get_height()-1))
+                colors[name] = screen.get_at((x, y))
+            car.collision_detector.update_colors(colors)
+
+            # wall → crash
+            if car.collision_detector.check_wall_collision(colors):
+                car.handle_collision()
+                break
+
+            # wheel on grass → off-track friction
+            if car.collision_detector.any_wheel_offtrack(colors):
+                car.Crr = car.Crr_offtrack
+            else:
+                car.Crr = car.Crr_normal
+
+
+        # 5) now draw the world
+        screen.fill((0, 200, 0))
+        track.draw(screen)
+        car.draw(screen)
+
         
         pygame.display.flip()
         clock.tick(60)
