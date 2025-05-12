@@ -180,6 +180,12 @@ class TrackEditor:
            self.palette_height
         )
 
+        self.spawn_point    = None        # will hold (cell_x, cell_y)
+        self.finish_line    = []          # will hold exactly two points [(x1,y1),(x2,y2)]
+        self.checkpoints    = []          # list of (cell_x, cell_y)
+        self.edit_mode      = 'block'     # modes: 'block', 'spawn', 'finish', 'checkpoint'
+
+
     def init_grid(self):
         self.grid = Grid(self.grid_size, self.grid_pixel_size)
         
@@ -210,6 +216,14 @@ class TrackEditor:
                     elif event.key == pygame.K_r and self.selected_block:
                         # rotate by 90° each press
                         self.selected_rotation = (self.selected_rotation + 90) % 360
+                    elif event.key == pygame.K_p:
+                        self.edit_mode = 'spawn'
+                    elif event.key == pygame.K_f:
+                        self.edit_mode = 'finish'
+                        self.finish_line = []          # reset finish‐line points
+                    elif event.key == pygame.K_k:
+                        self.edit_mode = 'checkpoint'
+
 
 
             self.screen.fill((200, 200, 200))  # Light gray background
@@ -223,6 +237,29 @@ class TrackEditor:
             grid_surface = pygame.Surface((self.grid_pixel_size, self.grid_pixel_size))
             grid_surface.fill((0, 255, 0))  # Green background for the grid
             self.grid.draw(grid_surface)
+
+            cell = self.grid.cell_size
+
+            # spawn point
+            if self.spawn_point:
+                sx, sy = self.spawn_point
+                cx = sx * cell + cell // 2
+                cy = sy * cell + cell // 2
+                pygame.draw.circle(grid_surface, (0, 0, 255), (cx, cy), cell // 3, 2)
+
+            # finish line
+            if len(self.finish_line) == 2:
+                (x1, y1), (x2, y2) = self.finish_line
+                p1 = (x1 * cell + cell // 2, y1 * cell + cell // 2)
+                p2 = (x2 * cell + cell // 2, y2 * cell + cell // 2)
+                pygame.draw.line(grid_surface, (255, 255, 255), p1, p2, max(1, cell // 10))
+
+            # checkpoints
+            for cx_cell, cy_cell in self.checkpoints:
+                p1 = (cx_cell * cell, cy_cell * cell + cell // 2)
+                p2 = ((cx_cell + 1) * cell, cy_cell * cell + cell // 2)
+                pygame.draw.line(grid_surface, (255, 165, 0), p1, p2, max(1, cell // 10))
+
             
             # Draw the grid surface on the main screen
             self.screen.blit(grid_surface, (grid_x, grid_y))
@@ -243,13 +280,34 @@ class TrackEditor:
             if grid_x <= pos[0] < grid_x + self.grid_pixel_size and grid_y <= pos[1] < grid_y + self.grid_pixel_size:
                 cell_x, cell_y = self.grid.get_cell(pos[0] - grid_x, pos[1] - grid_y)
                 if 0 <= cell_x < self.grid_size and 0 <= cell_y < self.grid_size:
-                    if button == 1:  # Left click
-                        if self.selected_block:
-                            self.grid.place_block(cell_x, cell_y, self.selected_block, self.selected_rotation)
-                        else: # Remove block
-                            self.grid.remove_block(cell_x, cell_y)
+                    # … compute cell_x, cell_y …
+                    if button == 1:  # left‐click
+                        if self.edit_mode == 'spawn':
+                            self.spawn_point = (cell_x, cell_y)
+                            self.edit_mode   = 'block'
+
+                        elif self.edit_mode == 'finish':
+                            self.finish_line.append((cell_x, cell_y))
+                            if len(self.finish_line) >= 2:
+                                self.edit_mode = 'block'
+
+                        elif self.edit_mode == 'checkpoint':
+                            self.checkpoints.append((cell_x, cell_y))
+
+                        else:  # normal block mode
+                            # new
+                            if self.selected_block:
+                                self.grid.place_block(
+                                    cell_x, cell_y,
+                                    self.selected_block,
+                                    self.selected_rotation
+                                )
+
+                            else:
+                                self.grid.remove_block(cell_x, cell_y)
                     elif button == 3:  # Right click
                         self.grid.remove_block(cell_x, cell_y)
+
 
     def handle_palette_click(self, pos):
         x, y = pos
@@ -299,7 +357,7 @@ class TrackEditor:
 
 
     def draw_instructions(self):
-        text = self.font.render("Left-click to place/remove blocks", True, (0, 0, 0))
+        text = self.font.render("Left-click to place blocks", True, (0, 0, 0))
         self.screen.blit(text, (10, 10))
         text = self.font.render("Right-click to remove blocks", True, (0, 0, 0))
         self.screen.blit(text, (10, 30))
@@ -307,8 +365,14 @@ class TrackEditor:
         self.screen.blit(text, (10, 50))
         text = self.font.render("Press 'L' to load track", True, (0, 0, 0))
         self.screen.blit(text, (10, 70))
-        text = self.font.render("Press 'Esc' to return to menu", True, (0, 0, 0))
+        text = self.font.render("Press 'P' to place spawn point", True, (0, 0, 0))
         self.screen.blit(text, (10, 90))
+        text = self.font.render("Press 'F' to place finish line", True, (0, 0, 0))
+        self.screen.blit(text, (10, 110))
+        text = self.font.render("Press 'K' to place checkpoint", True, (0, 0, 0))
+        self.screen.blit(text, (10, 130))
+        text = self.font.render("Press 'Esc' to return to menu", True, (0, 0, 0))
+        self.screen.blit(text, (10, 150))
 
     def save_track(self):
         #file_name = input("Enter file name: ")
@@ -318,6 +382,21 @@ class TrackEditor:
             writer = csv.writer(file)
             # Write the grid size as the first row
             writer.writerow([self.grid_size])
+
+            if self.spawn_point:
+                x, y = self.spawn_point
+                writer.writerow(['spawn', x, y])
+
+            if len(self.finish_line) == 2:
+                x1, y1 = self.finish_line[0]
+                x2, y2 = self.finish_line[1]
+                writer.writerow(['finish', x1, y1, x2, y2])
+
+            for cp in self.checkpoints:
+                writer.writerow(['checkpoint', cp[0], cp[1]])
+
+            # ... then your existing loop that writes each block row ...
+
             for y in range(self.grid_size):
                 for x in range(self.grid_size):
                     block = self.grid.get_block(x, y)
@@ -333,19 +412,29 @@ class TrackEditor:
         if os.path.exists(file_name + '.csv'):
             with open(file_name + '.csv', 'r') as file:
                 reader = csv.reader(file)
-                # Read the grid size from the first row
+                # reset metadata
+                self.spawn_point = None
+                self.finish_line = []
+                self.checkpoints = []
+
+                # first row: grid size
                 self.grid_size = int(next(reader)[0])
-                print(f"Loaded grid size: {self.grid_size}")
-                # Reinitialize the grid with the new size
                 self.init_grid()
+
                 for row in reader:
-                    x_str, y_str, idx_str, rot_str = row
-                    x    = int(x_str)
-                    y    = int(y_str)
-                    idx  = int(idx_str)
-                    rot  = int(rot_str)
-                    surf = self.blocks[idx]               # look up the Surface
-                    self.grid.place_block(x, y, (surf, rot))
+                    tag = row[0]
+                    if tag == 'spawn':
+                        self.spawn_point = (int(row[1]), int(row[2]))
+                    elif tag == 'finish':
+                        x1, y1, x2, y2 = map(int, row[1:])
+                        self.finish_line = [(x1, y1), (x2, y2)]
+                    elif tag == 'checkpoint':
+                        self.checkpoints.append((int(row[1]), int(row[2])))
+                    else:
+                        x, y, idx, rot = map(int, row)
+                        surf = self.blocks[idx]
+                        self.grid.place_block(x, y, surf, rot)
+
 
             return self.grid  # Return the loaded grid
         else:
@@ -516,20 +605,24 @@ class Track:
             with open(full_path, 'r') as file:
                 reader = csv.reader(file)
                 # First row contains the grid size
-                self.grid_size = int(next(reader)[0])
-                self.block_size = self.screen_size // self.grid_size
-
-                self.blocks = [] # Clear previous blocks
+                self.blocks     = []
+                self.spawn_point = None
+                self.finish_line = []
+                self.checkpoints = []
 
                 for row in reader:
-                    # expect rows like: x, y, tileIndex, rotationDeg
-                    if len(row) == 4:
+                    tag = row[0]
+                    if tag == 'spawn':
+                        self.spawn_point = (int(row[1]), int(row[2]))
+                    elif tag == 'finish':
+                        x1, y1, x2, y2 = map(int, row[1:])
+                        self.finish_line = [(x1, y1), (x2, y2)]
+                    elif tag == 'checkpoint':
+                        self.checkpoints.append((int(row[1]), int(row[2])))
+                    else:
                         x, y, idx, rot = map(int, row)
                         self.blocks.append((x, y, idx, rot))
-                    # (optional) support old 3-column format:
-                    elif len(row) == 3:
-                        x, y, idx = map(int, row)
-                        self.blocks.append((x, y, idx, 0))
+
 
 
             print(f"Successfully loaded track '{file_name}' with {len(self.blocks)} blocks")
@@ -712,9 +805,15 @@ def drive_car(screen, track_name):
     
     car_width, car_height = track.get_car_size()
     
-    # Place the car at the center of the screen
-    car_x = (screen_size[0] - car_width) / 2
-    car_y = (screen_size[1] - car_height) / 2
+    # Place the car at the spawn point on the screen
+    if hasattr(track, 'spawn_point') and track.spawn_point:
+        gx, gy = track.spawn_point
+        car_x = gx * track.block_size + track.block_size / 2 - car_width / 2
+        car_y = gy * track.block_size + track.block_size / 2 - car_height / 2
+    else:
+        car_x = (screen_size[0] - car_width) / 2
+        car_y = (screen_size[1] - car_height) / 2
+
     
     car = Car(car_x, car_y, car_width, car_height)
     
@@ -811,6 +910,20 @@ def drive_car(screen, track_name):
         # 5) now draw the world
         screen.fill((0, 200, 0))
         track.draw(screen)
+
+        bs = track.block_size
+
+        if getattr(track, 'finish_line', None) and len(track.finish_line) == 2:
+            (x1, y1), (x2, y2) = track.finish_line
+            p1 = (x1 * bs + bs // 2, y1 * bs + bs // 2)
+            p2 = (x2 * bs + bs // 2, y2 * bs + bs // 2)
+            pygame.draw.line(screen, (255, 255, 255), p1, p2, max(1, bs // 10))
+
+        for cx, cy in getattr(track, 'checkpoints', []):
+            p1 = (cx * bs, cy * bs + bs // 2)
+            p2 = ((cx + 1) * bs, cy * bs + bs // 2)
+            pygame.draw.line(screen, (255, 165, 0), p1, p2, max(1, bs // 10))
+
         car.draw(screen)
 
         
