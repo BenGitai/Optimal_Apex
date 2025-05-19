@@ -182,7 +182,8 @@ class TrackEditor:
 
         self.spawn_point    = None        # will hold (cell_x, cell_y)
         self.finish_line    = []          # will hold exactly two points [(x1,y1),(x2,y2)]
-        self.checkpoints    = []          # list of (cell_x, cell_y)
+        self.checkpoint_lines   = []     # list of [ (x1,y1),(x2,y2) ] segments
+        self._current_checkpoint = []     # temp storage for the two clicks
         self.edit_mode      = 'block'     # modes: 'block', 'spawn', 'finish', 'checkpoint'
 
 
@@ -223,7 +224,7 @@ class TrackEditor:
                         self.finish_line = []          # reset finish‐line points
                     elif event.key == pygame.K_k:
                         self.edit_mode = 'checkpoint'
-
+                        self._current_checkpoint = []
 
 
             self.screen.fill((200, 200, 200))  # Light gray background
@@ -254,12 +255,21 @@ class TrackEditor:
                 p2 = (x2 * cell + cell // 2, y2 * cell + cell // 2)
                 pygame.draw.line(grid_surface, (255, 255, 255), p1, p2, max(1, cell // 10))
 
-            # checkpoints
-            for cx_cell, cy_cell in self.checkpoints:
-                p1 = (cx_cell * cell, cy_cell * cell + cell // 2)
-                p2 = ((cx_cell + 1) * cell, cy_cell * cell + cell // 2)
-                pygame.draw.line(grid_surface, (255, 165, 0), p1, p2, max(1, cell // 10))
+            # draw saved checkpoint lines
+            for (x1,y1),(x2,y2) in self.checkpoint_lines:
+                p1 = (x1*cell + cell//2, y1*cell + cell//2)
+                p2 = (x2*cell + cell//2, y2*cell + cell//2)
+                pygame.draw.line(grid_surface, (255,165,0), p1, p2, max(1,cell//10))
 
+            # if you’re in the middle of placing one, show the “rubber‐band”:
+            if self.edit_mode=='checkpoint' and len(self._current_checkpoint)==1:
+                (x1,y1) = self._current_checkpoint[0]
+                p1 = (x1*cell + cell//2, y1*cell + cell//2)
+                mouse_x, mouse_y = pygame.mouse.get_pos()
+                # convert screen mouse to grid_surface coords:
+                rel_x = mouse_x - grid_x
+                rel_y = mouse_y - grid_y
+                pygame.draw.line(grid_surface, (255,200,0), p1, (rel_x,rel_y), max(1,cell//10))
             
             # Draw the grid surface on the main screen
             self.screen.blit(grid_surface, (grid_x, grid_y))
@@ -292,7 +302,13 @@ class TrackEditor:
                                 self.edit_mode = 'block'
 
                         elif self.edit_mode == 'checkpoint':
-                            self.checkpoints.append((cell_x, cell_y))
+                            # record one end
+                            self._current_checkpoint.append((cell_x, cell_y))
+                            # once we have two, store it and reset
+                            if len(self._current_checkpoint) == 2:
+                                self.checkpoint_lines.append(tuple(self._current_checkpoint))
+                                self._current_checkpoint = []
+                                self.edit_mode = 'block'
 
                         else:  # normal block mode
                             # new
@@ -392,8 +408,8 @@ class TrackEditor:
                 x2, y2 = self.finish_line[1]
                 writer.writerow(['finish', x1, y1, x2, y2])
 
-            for cp in self.checkpoints:
-                writer.writerow(['checkpoint', cp[0], cp[1]])
+            for (x1,y1),(x2,y2) in self.checkpoint_lines:
+                writer.writerow(['checkpoint', x1, y1, x2, y2])
 
             # ... then your existing loop that writes each block row ...
 
@@ -429,7 +445,8 @@ class TrackEditor:
                         x1, y1, x2, y2 = map(int, row[1:])
                         self.finish_line = [(x1, y1), (x2, y2)]
                     elif tag == 'checkpoint':
-                        self.checkpoints.append((int(row[1]), int(row[2])))
+                        x1,y1,x2,y2 = map(int, row[1:])
+                        self.checkpoint_lines.append(((x1,y1),(x2,y2)))
                     else:
                         x, y, idx, rot = map(int, row)
                         surf = self.blocks[idx]
@@ -581,15 +598,17 @@ class Car:
         # keep public angle in sync
         self.angle = -math.degrees(self.yaw)
 
-
-
 class Track:
     def __init__(self, name):
         self.name = name
         self.blocks = []
+        self.spawn_point   = None
+        self.finish_line   = []
         self.grid_size = 0
         self.block_size = 0
         self.screen_size = 800  # We'll use a square screen
+        self.checkpoint_lines = []
+
         self.load_track()
 
     def load_track(self):
@@ -597,19 +616,26 @@ class Track:
             file_name = f"{self.name}.csv" if not self.name.endswith('.csv') else self.name
             full_path = os.path.abspath(file_name)
             print(f"Attempting to load track from: {full_path}")
-            
+
             if not os.path.exists(full_path):
                 print(f"File not found: {full_path}")
                 return
 
             with open(full_path, 'r') as file:
                 reader = csv.reader(file)
-                # First row contains the grid size
-                self.blocks     = []
+
+                # --- NEW: grab grid size from the very first row ---
+                first_row = next(reader)
+                self.grid_size  = int(first_row[0])
+                self.block_size = self.screen_size // self.grid_size
+
+                # now clear and init all your lists
+                self.blocks      = []
                 self.spawn_point = None
                 self.finish_line = []
-                self.checkpoints = []
+                self.checkpoints_lines = []
 
+                # existing loop over the rest of the rows
                 for row in reader:
                     tag = row[0]
                     if tag == 'spawn':
@@ -618,19 +644,21 @@ class Track:
                         x1, y1, x2, y2 = map(int, row[1:])
                         self.finish_line = [(x1, y1), (x2, y2)]
                     elif tag == 'checkpoint':
-                        self.checkpoints.append((int(row[1]), int(row[2])))
+                        # —or— if you moved to line‐based checkpoints:
+                        x1, y1, x2, y2 = map(int, row[1:])
+                        self.checkpoint_lines.append([[x1,y1],[x2,y2]])
                     else:
                         x, y, idx, rot = map(int, row)
                         self.blocks.append((x, y, idx, rot))
 
-
-
             print(f"Successfully loaded track '{file_name}' with {len(self.blocks)} blocks")
             print(f"Grid size: {self.grid_size}, Block size: {self.block_size}")
+
         except FileNotFoundError:
             print(f"Track file '{file_name}' not found.")
         except Exception as e:
-            print(f"Error loading track: {str(e)}")
+            print(f"Error loading track: {e}")
+
 
     def draw(self, screen):
         # Fill the background with green
@@ -725,14 +753,14 @@ class CarCollisionDetector:
                 continue
             colorDifference = abs(color[0] - (self.last_colors[name])[0]) + abs(color[1] - (self.last_colors[name])[1]) + abs(color[2] - (self.last_colors[name])[2])
             if colorDifference > 3:
-                print(f"Listener '{name}' detected new color: {color}")
+                #print(f"Listener '{name}' detected new color: {color}")
                 self.last_colors[name] = color
     def update(self, colors):
 
         for name, color in colors.items():
             colorDifference = abs(color[0] - self.last_colors[name][0]) + abs(color[1] - self.last_colors[name][1]) + abs(color[2] - self.last_colors[name][2])
             if colorDifference > 3:
-                print(f"Listener '{name}' detected new color: {color}")
+                #print(f"Listener '{name}' detected new color: {color}")
                 self.last_colors[name] = color
 
     def draw_debug(self, screen):
@@ -746,7 +774,7 @@ class CarCollisionDetector:
         """
         for name, color in colors.items():
             if color[:3] == (0, 200, 0):
-                print(f"Listener '{name}' detected grass color: {color}")
+                #print(f"Listener '{name}' detected grass color: {color}")
                 return True
         return False
     
@@ -767,6 +795,90 @@ class CarCollisionDetector:
             if 'wheel' in name and col[:3] == (0, 200, 0):
                 return True
         return False
+
+class RaceManager:
+    def __init__(self, track, font):
+        self.track            = track
+        self.font             = font
+        self.lap_count        = 0
+        self.lap_times        = []
+        self.current_cp_idx   = 0
+        self.lap_start        = pygame.time.get_ticks() / 1000.0
+        self.lap_start      = pygame.time.get_ticks() / 1000.0
+        self.best_lap       = None
+
+    def update(self, car):
+        """Call this at each sub-step to catch fast crossings."""
+        bs   = self.track.block_size
+        prev = (car.prev_x, car.prev_y)
+        curr = (car.x, car.y)
+
+        # 1) In-order checkpoint crossing
+        if self.current_cp_idx < len(self.track.checkpoint_lines):
+            x1,y1 = self.track.checkpoint_lines[self.current_cp_idx][0]
+            x2,y2 = self.track.checkpoint_lines[self.current_cp_idx][1]
+            p1 = (x1*bs + bs/2, y1*bs + bs/2)
+            p2 = (x2*bs + bs/2, y2*bs + bs/2)
+            if self._crossed(prev, curr, p1, p2):
+                self.current_cp_idx += 1
+                print(f"Checkpoint {self.current_cp_idx} cleared")
+
+        # 2) Only after *all* checkpoints, check finish-line for a lap
+        elif self.current_cp_idx == len(self.track.checkpoint_lines) and len(self.track.finish_line) == 2:
+            (f1x,f1y),(f2x,f2y) = self.track.finish_line
+            f1 = (f1x*bs + bs/2, f1y*bs + bs/2)
+            f2 = (f2x*bs + bs/2, f2y*bs + bs/2)
+            if self._crossed(prev, curr, f1, f2):
+                now = pygame.time.get_ticks() / 1000.0
+                lap_duration = now - self.lap_start
+                # record exactly once
+                self.lap_times.append(lap_duration)
+                # update best if needed
+                if self.best_lap is None or lap_duration < self.best_lap:
+                    self.best_lap = lap_duration
+                self.lap_start = now
+                self.lap_count += 1
+                self.current_cp_idx = 0
+                print(f"Lap {self.lap_count} complete: {lap_duration:.2f}s")
+
+    def draw(self, screen):
+        """Call this before drawing the car."""
+        # Lap count
+        lap_surf = self.font.render(f"Lap: {self.lap_count}", True, (0,0,0))
+        screen.blit(lap_surf, (10, 10))
+
+        # Current lap timer
+        now  = pygame.time.get_ticks() / 1000.0
+        curr = now - self.lap_start
+        curr_surf = self.font.render(f"Current: {curr:.2f}s", True, (0,0,0))
+        screen.blit(curr_surf, (10, 40))
+
+        # Last lap time
+        if self.lap_times:
+            last = self.lap_times[-1]
+            last_surf = self.font.render(f"Last: {last:.2f}s", True, (0,0,0))
+            screen.blit(last_surf, (10, 70))
+
+        # Best lap time
+        if self.best_lap is not None:
+            best_surf = self.font.render(f"Best: {self.best_lap:.2f}s", True, (0,0,0))
+            screen.blit(best_surf, (10, 100))
+
+    @staticmethod
+    def _crossed(p0, p1, a, b):
+        """
+        Returns True if the movement from p0→p1 crosses the line segment a→b.
+        """
+        x0, y0 = p0
+        x1, y1 = p1
+        ax, ay = a
+        bx, by = b
+
+        # signed distance from each point to the line
+        side0 = (x0 - ax) * (by - ay) - (y0 - ay) * (bx - ax)
+        side1 = (x1 - ax) * (by - ay) - (y1 - ay) * (bx - ax)
+
+        return side0 * side1 < 0
 
 
 class Menu:
@@ -804,7 +916,7 @@ def drive_car(screen, track_name):
     screen = pygame.display.set_mode(screen_size)  # Resize the screen
     
     car_width, car_height = track.get_car_size()
-    
+
     # Place the car at the spawn point on the screen
     if hasattr(track, 'spawn_point') and track.spawn_point:
         gx, gy = track.spawn_point
@@ -816,7 +928,10 @@ def drive_car(screen, track_name):
 
     
     car = Car(car_x, car_y, car_width, car_height)
-    
+
+    default_font = pygame.font.Font(None, 32)
+    manager = RaceManager(track, default_font)
+
     clock = pygame.time.Clock()
     
     while True:
@@ -876,6 +991,26 @@ def drive_car(screen, track_name):
 
         # update with real physics
         # 1) advance the car
+                # build a static surface with track + finish + checkpoints
+        track_surface = pygame.Surface(screen_size)
+
+        # 1a) draw base track
+        track_surface.fill((0, 200, 0))
+        track.draw(track_surface)
+
+        # 1b) overlay finish line
+        bs = track.block_size
+        if getattr(track, 'finish_line', None) and len(track.finish_line) == 2:
+            (x1, y1), (x2, y2) = track.finish_line
+            p1 = (x1*bs + bs//2, y1*bs + bs//2)
+            p2 = (x2*bs + bs//2, y2*bs + bs//2)
+            pygame.draw.line(track_surface, (255,255,255), p1, p2, max(1, bs//10))
+
+        # 1c) overlay checkpoint segments
+        for (cx1, cy1), (cx2, cy2) in getattr(track, 'checkpoint_lines', []):
+            q1 = (cx1*bs + bs//2, cy1*bs + bs//2)
+            q2 = (cx2*bs + bs//2, cy2*bs + bs//2)
+            pygame.draw.line(track_surface, (255,165,0), q1, q2, max(1, bs//10))
 
         # determine how many sub-steps so max move per step is ≤ half a cell
         max_dist = track.block_size * 0.05
@@ -892,7 +1027,7 @@ def drive_car(screen, track_name):
             for name, x, y in positions:
                 x = max(0, min(x, screen.get_width()-1))
                 y = max(0, min(y, screen.get_height()-1))
-                colors[name] = screen.get_at((x, y))
+                colors[name] = track_surface.get_at((x, y))
             car.collision_detector.update_colors(colors)
 
             # wall → crash
@@ -907,28 +1042,24 @@ def drive_car(screen, track_name):
                 car.Crr = car.Crr_normal
 
 
-        # 5) now draw the world
-        screen.fill((0, 200, 0))
-        track.draw(screen)
+            # — after screen = pygame.display.set_mode(screen_size) —
 
-        bs = track.block_size
+            # update lap logic
+            manager.update(car)
 
-        if getattr(track, 'finish_line', None) and len(track.finish_line) == 2:
-            (x1, y1), (x2, y2) = track.finish_line
-            p1 = (x1 * bs + bs // 2, y1 * bs + bs // 2)
-            p2 = (x2 * bs + bs // 2, y2 * bs + bs // 2)
-            pygame.draw.line(screen, (255, 255, 255), p1, p2, max(1, bs // 10))
+        # show the pre-rendered track + lines
+        screen.blit(track_surface, (0, 0))
 
-        for cx, cy in getattr(track, 'checkpoints', []):
-            p1 = (cx * bs, cy * bs + bs // 2)
-            p2 = ((cx + 1) * bs, cy * bs + bs // 2)
-            pygame.draw.line(screen, (255, 165, 0), p1, p2, max(1, bs // 10))
+        # draw the lap/timer UI
+        manager.draw(screen)
 
+        # draw the car on top
         car.draw(screen)
-
         
         pygame.display.flip()
         clock.tick(60)
+
+
 
 def main():
     pygame.init()
