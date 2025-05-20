@@ -25,6 +25,19 @@ road_tiles = [
 
 CAR_IMAGE_RAW = pygame.image.load(os.path.join(ASSETS_DIR, 'CarSprite.png')).convert_alpha()
 
+# Terrain‐sensor colors
+GRASS_COLOR    = (  0,200,  0)   # off‐road grass
+SAND_COLOR     = (255,255,  0)   # yellow = sand
+GRAVEL_COLOR   = (  0,  0,  0)   # black = gravel
+CURB_BLUE_COLOR= (  0,  0,255)   # blue = slight curb
+
+# Friction multipliers relative to your normal rolling‐resistance
+Crr_NORMAL_MULT = 1.0
+Crr_BLUE_MULT   = 1.5
+Crr_GRASS_MULT  = 3.0
+Crr_GRAVEL_MULT = 5.0
+Crr_SAND_MULT   = 8.0
+
 def get_text_input(screen, prompt, font, box_rect, text_color=(255,255,255), box_color=(0,0,0), border_color=(255,255,255), border_width=2):
     """
     Pops up a text-entry box over `screen`, returns the entered string when Enter is pressed.
@@ -483,6 +496,12 @@ class Car:
         self.Crr_normal = self.Crr
         self.Crr_offtrack = self.Crr * 5.0  # double rolling resistance when off‐road
 
+        # per‐terrain Crr values
+        self.Crr_blue     = self.Crr_normal * Crr_BLUE_MULT
+        self.Crr_grass    = self.Crr_normal * Crr_GRASS_MULT
+        self.Crr_gravel   = self.Crr_normal * Crr_GRAVEL_MULT
+        self.Crr_sand     = self.Crr_normal * Crr_SAND_MULT
+
         # dynamic state
         self.velocity = 0.0          # forward speed (px/sec)
         self.yaw = math.radians(self.angle)  # vehicle heading (rad)
@@ -936,7 +955,7 @@ class Menu:
     def __init__(self, screen):
         self.screen = screen
         self.font = pygame.font.Font(None, 36)
-        self.options = ["Track Editor", "Car Editor", "Load Game", "Quit"]
+        self.options = ["Track Editor", "Load Game", "Quit"]
         self.selected = 0
 
     def draw(self):
@@ -963,15 +982,20 @@ def compute_spawns(spawn_cell, num, collide, track):
     center_x = cx * bs + bs/2
     center_y = cy * bs + bs/2
 
-    # figure out track forward direction from finish_line
-    fx1, fy1 = track.finish_line[0]
-    fx2, fy2 = track.finish_line[1]
-    vertical = (fy1 == fy2)
-    # sign = +1 means “away from finish”, −1 “toward finish”
-    if vertical:
-        sign = 1 if cy > fy1 else -1
+    # Determine track “forward” direction from finish_line if available
+    if hasattr(track, 'finish_line') and len(track.finish_line) == 2:
+        fx1, fy1 = track.finish_line[0]
+        fx2, fy2 = track.finish_line[1]
+        vertical = (fy1 == fy2)
+        # sign = +1 means “away from finish”, −1 “toward finish”
+        if vertical:
+            sign = 1 if cy > fy1 else -1
+        else:
+            sign = 1 if cx > fx1 else -1
     else:
-        sign = 1 if cx > fx1 else -1
+        # No finish line: assume horizontal track, push cars “down” as default
+        vertical = False
+        sign = 1
 
     spawns = []
     if not collide:
@@ -980,8 +1004,8 @@ def compute_spawns(spawn_cell, num, collide, track):
     else:
         offset = bs * 0.25  # quarter‐block corner offset
         for i in range(num):
-            layer  = i // 2      # 0 = inner row, 1 = one back, 2 = two back, ...
-            corner = i %  2      # 0 = +xy corner, 1 = −xy corner
+            layer  = i // 2      # 0 = inner row, 1 = one back, etc.
+            corner = i %  2      # 0 = +xy, 1 = -xy
 
             # start with corner offset
             dx =  offset if corner == 0 else -offset
@@ -1145,17 +1169,33 @@ def drive_car(screen, track_name):
                     colors[name] = track_surface.get_at((x, y))
                 c.collision_detector.update_colors(colors)
 
-                # wall → crash
                 if c.collision_detector.check_wall_collision(colors):
+                    # crashes on walls as before
                     c.handle_collision()
-                    break
 
-                # wheel on grass → off-track friction
-                if c.collision_detector.any_wheel_offtrack(colors):
-                    c.Crr = c.Crr_offtrack
                 else:
-                    c.Crr = c.Crr_normal
+                    # look only at the wheel sensors for terrain
+                    wheel_colors = [col[:3] for name,col in colors.items() if 'wheel' in name]
 
+                    # sand = heaviest
+                    if any(col == SAND_COLOR     for col in wheel_colors):
+                        c.Crr = c.Crr_sand
+
+                    # then gravel
+                    elif any(col == GRAVEL_COLOR for col in wheel_colors):
+                        c.Crr = c.Crr_gravel
+
+                    # then grass
+                    elif any(col == GRASS_COLOR  for col in wheel_colors):
+                        c.Crr = c.Crr_grass
+
+                    # then blue curb (slight)
+                    elif any(col == CURB_BLUE_COLOR for col in wheel_colors):
+                        c.Crr = c.Crr_blue
+
+                    # otherwise normal track
+                    else:
+                        c.Crr = c.Crr_normal
 
                 # — after screen = pygame.display.set_mode(screen_size) —
 
