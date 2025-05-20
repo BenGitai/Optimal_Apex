@@ -4,26 +4,37 @@ import csv
 import os
 import math
 
-pygame.font.init()
-default_font = pygame.font.Font(None, 32)
+# from ai import AIController
 
-pygame.init()
-screen = pygame.display.set_mode((800, 800))
+# pygame.font.init()
+# default_font = pygame.font.Font(None, 32)
+
+# pygame.init()
+# screen = pygame.display.set_mode((800, 800))
+
+# delay font until runtime
+default_font = None
 
 # directory where your ‘assets’ folder lives (next to RacingAI.py)
 ASSETS_DIR = os.path.join(os.path.dirname(__file__), 'assets')
 _sheet_raw = pygame.image.load(os.path.join(ASSETS_DIR, 'TrackPieces.png'))
-sheet   = _sheet_raw.convert_alpha()
-tile_w  = sheet.get_width()  // 3
-tile_h  = sheet.get_height() // 3
+
+# Coverting later to avoid loading issues
+# sheet   = _sheet_raw.convert_alpha()
+
+tile_w     = _sheet_raw.get_width()  // 3
+tile_h     = _sheet_raw.get_height() // 3
 
 # this road_tiles list is now global to the module
-road_tiles = [
-    sheet.subsurface(pygame.Rect(col*tile_w, row*tile_h, tile_w, tile_h)).copy()
-    for row in range(3) for col in range(3)
-]
+#road_tiles = [
+#    sheet.subsurface(pygame.Rect(col*tile_w, row*tile_h, tile_w, tile_h)).copy()
+#    for row in range(3) for col in range(3)
+#]
+road_tiles = None
 
-CAR_IMAGE_RAW = pygame.image.load(os.path.join(ASSETS_DIR, 'CarSprite.png')).convert_alpha()
+
+_car_raw       = pygame.image.load(os.path.join(ASSETS_DIR, 'CarSprite.png'))
+CAR_IMAGE_RAW = None
 
 # Terrain‐sensor colors
 GRASS_COLOR    = (  0,200,  0)   # off‐road grass
@@ -283,6 +294,22 @@ class TrackEditor:
                 rel_x = mouse_x - grid_x
                 rel_y = mouse_y - grid_y
                 pygame.draw.line(grid_surface, (255,200,0), p1, (rel_x,rel_y), max(1,cell//10))
+
+            # draw saved checkpoint lines
+            for idx, ((x1,y1),(x2,y2)) in enumerate(self.checkpoint_lines):
+                # existing line‐draw…
+                p1 = (x1*cell + cell//2, y1*cell + cell//2)
+                p2 = (x2*cell + cell//2, y2*cell + cell//2)
+                pygame.draw.line(grid_surface, (255,165,0), p1, p2, max(1,cell//10))
+
+                # NEW: draw the index (1-based) at the midpoint
+                mx = (p1[0] + p2[0]) // 2
+                my = (p1[1] + p2[1]) // 2
+                label_surf = self.font.render(str(idx+1), True, (0,0,0))
+                # center the label
+                rect = label_surf.get_rect(center=(mx,my))
+                grid_surface.blit(label_surf, rect)
+
             
             # Draw the grid surface on the main screen
             self.screen.blit(grid_surface, (grid_x, grid_y))
@@ -336,7 +363,11 @@ class TrackEditor:
                                 self.grid.remove_block(cell_x, cell_y)
                     elif button == 3:  # Right click
                         self.grid.remove_block(cell_x, cell_y)
-
+                        if self.edit_mode == 'checkpoint':
+                            self.checkpoint_lines = [
+                                seg for seg in self.checkpoint_lines
+                                if (cell_x, cell_y) not in seg
+                            ]
 
     def handle_palette_click(self, pos):
         x, y = pos
@@ -610,6 +641,45 @@ class Car:
         self.velocity = 0
         # keep public angle in sync
         self.angle = -math.degrees(self.yaw)
+
+    def get_lidar(self, surface, num_rays=5, fov=math.pi, max_dist=None, step=4):
+        """
+        Cast `num_rays` rays in a fan of width `fov` (radians) centered on
+        the car's heading, sampling every `step` pixels up to `max_dist`.
+        Returns a list of normalized distances [0..1].
+        """
+        import math
+
+        # set a default max_dist if none provided
+        if max_dist is None:
+            max_dist = self.width * 10  # e.g. ten car‐lengths
+
+        readings = []
+        half = fov / 2
+        for i in range(num_rays):
+            # angle relative to car yaw
+            ray_ang = self.yaw + (-half + fov * i / (num_rays - 1))
+            dist = 0
+            hit = False
+
+            # march along the ray
+            while dist < max_dist:
+                x = int(self.x + dist * math.cos(ray_ang))
+                y = int(self.y + dist * math.sin(ray_ang))
+                # stop if we go off‐screen
+                if not (0 <= x < surface.get_width() and 0 <= y < surface.get_height()):
+                    break
+                color = surface.get_at((x, y))[:3]
+                # treat grass or wall as an obstacle
+                if color == (0, 200, 0) or color == (255, 0, 0):
+                    hit = True
+                    break
+                dist += step
+
+            # clamp & normalize
+            readings.append(min(dist, max_dist) / max_dist)
+        return readings
+
 
 class Track:
     def __init__(self, name):
@@ -886,6 +956,41 @@ class RaceManager:
             best_surf = self.font.render(f"Best: {self.best_lap:.2f}s", True, (0,0,0))
             screen.blit(best_surf, (x_off, y_off + line_h * 3))
 
+    def get_next_checkpoint_info(self, car):
+        """
+        Returns (distance, relative_angle) to the next objective:
+         - if there are remaining checkpoint_lines, use the midpoint of the current one;
+         - otherwise, use the midpoint of the finish_line (if present).
+        distance is in pixels; angle is radians ∈ [-π, π], relative to car.yaw.
+        """
+        import math
+
+        # pick segment
+        idx = self.current_cp_idx
+        if idx < len(self.track.checkpoint_lines):
+            (x1,y1),(x2,y2) = self.track.checkpoint_lines[idx]
+        elif len(self.track.finish_line) == 2:
+            (x1,y1),(x2,y2) = self.track.finish_line
+        else:
+            return 0.0, 0.0  # no objective
+
+        # midpoint in world coords
+        bs = self.track.block_size
+        mx = (x1 + x2) * bs * 0.5 + bs * 0.5
+        my = (y1 + y2) * bs * 0.5 + bs * 0.5
+
+        # vector to midpoint
+        dx = mx - car.x
+        dy = my - car.y
+        dist = math.hypot(dx, dy)
+
+        # absolute bearing
+        bear = math.atan2(dy, dx)
+        # relative to car heading
+        rel = (bear - car.yaw + math.pi) % (2*math.pi) - math.pi
+
+        return dist, rel
+
 
     @staticmethod
     def _crossed(p0, p1, a, b):
@@ -1038,14 +1143,19 @@ def drive_car(screen, track_name):
     default_font = pygame.font.Font(None, 32)
     # ask how many cars
 
+    # ask how many human players
     box = pygame.Rect(screen.get_width()//2-150, screen.get_height()//2-20, 300, 40)
-    num = int(get_text_input(screen, "Number of cars: ", default_font, box))
-    num_cars = max(1, min(num, 10))   # clamp between 1 and 10
+    human_count = int(get_text_input(screen, "Human players (0–4): ", default_font, box))
+    human_count = max(0, min(human_count, 4))
 
-    # ask if cars should collide
+    # ask how many AI players
     box = pygame.Rect(screen.get_width()//2-150, screen.get_height()//2-20, 300, 40)
-    txt = get_text_input(screen, "Car collisions? (y/n): ", default_font, box)
-    collide_cars = txt.strip().lower().startswith('y')
+    ai_count = int(get_text_input(screen, "AI players (0–50):    ", default_font, box))
+    ai_count = max(0, min(ai_count, 50))
+
+    # total cars and collision flag
+    num_cars    = human_count + ai_count
+    collide_cars = True  # or prompt separately if you like
     
     car_width, car_height = track.get_car_size()
 
@@ -1097,10 +1207,31 @@ def drive_car(screen, track_name):
     ]
     # for more cars you can recycle schemes or leave them unresponsive (for AI later)
 
-    controllers = [
-        KeyboardController(control_schemes[i % len(control_schemes)])
-        for i in range(len(cars))
-    ]
+    # now that RacingAI is fully defined, import the AIController
+    from ai import AIController
+
+    # then later, when building controllers:
+    controllers = []
+    # create human controllers first
+    for i in range(human_count):
+        scheme = control_schemes[i % len(control_schemes)]
+        controllers.append(KeyboardController(scheme))
+    # then AI controllers
+    for i in range(ai_count):
+        ai_ctrl = AIController(track, managers[human_count + i])
+        # ai_ctrl.track_surface = track_surface
+        controllers.append(ai_ctrl)
+
+    for idx in range(len(cars)):
+        if idx < 2:  # first two are humans
+            scheme = control_schemes[idx % len(control_schemes)]
+            controllers.append(KeyboardController(scheme))
+        else:
+            # create an AI controller, and give it the pre‐rendered track surface
+            ai_ctrl = AIController(track, managers[idx])
+            # ai_ctrl.track_surface = track_surface
+            controllers.append(ai_ctrl)
+
 
     clock = pygame.time.Clock()
     
@@ -1128,6 +1259,10 @@ def drive_car(screen, track_name):
         track_surface.fill((0, 200, 0))
         track.draw(track_surface)
 
+        # now that track_surface exists, hand it to all AI controllers
+        for ai_ctrl in controllers[human_count:]:
+            ai_ctrl.track_surface = track_surface
+
         # 1b) overlay finish line
         bs = track.block_size
         if getattr(track, 'finish_line', None) and len(track.finish_line) == 2:
@@ -1144,8 +1279,18 @@ def drive_car(screen, track_name):
 
         # determine how many sub-steps so max move per step is ≤ half a cell
         max_dist = track.block_size * 0.05
-        num_steps = max(1, int(abs(100 * dt) / max_dist) + 1)
+        num_steps = max(1, int(abs(1000 * dt) / max_dist) + 1)
         sub_dt = dt / num_steps
+
+        # after track.draw(track_surface) and lines:
+        for idx, ((x1,y1),(x2,y2)) in enumerate(track.checkpoint_lines):
+            bs = track.block_size
+            p1 = (x1*bs + bs//2, y1*bs + bs//2)
+            p2 = (x2*bs + bs//2, y2*bs + bs//2)
+            mx, my = (p1[0]+p2[0])//2, (p1[1]+p2[1])//2
+            lbl = default_font.render(str(idx+1), True, (0,0,0))
+            r = lbl.get_rect(center=(mx,my))
+            track_surface.blit(lbl, r)
 
         for _ in range(num_steps):
             # advance by a fraction of dt
@@ -1227,27 +1372,87 @@ def drive_car(screen, track_name):
         # show the pre-rendered track + lines
         screen.blit(track_surface, (0, 0))
 
+        # Draw the LIDAR rays for car 0
+
+        """
+
+        # LIDAR and distance debugging, not used in the final version
+
+        # ─── debug LIDAR for car 0 ───
+        import math
+        fov      = math.pi * 0.75
+        num_rays = 7
+        max_dist = cars[0].width * 10
+
+        rays = cars[0].get_lidar(track_surface,
+                                num_rays=num_rays,
+                                fov=fov,
+                                max_dist=max_dist)
+
+        for i, r in enumerate(rays):
+            ang = cars[0].yaw + (-fov/2 + fov * i/(num_rays-1))
+            end_x = cars[0].x + r * max_dist * math.cos(ang)
+            end_y = cars[0].y + r * max_dist * math.sin(ang)
+            pygame.draw.line(screen,
+                            (0, 255, 0),
+                            (cars[0].x, cars[0].y),
+                            (end_x, end_y),
+                            1)
+        ""
+        # --- Debug next‐checkpoint info for Car 0 ---
+        dist, angle = managers[0].get_next_checkpoint_info(cars[0])
+        print(f"[DEBUG] Car0 → next CP dist={dist:.1f}px, rel_ang={angle:.2f}rad")
+        
+
+        # draw a thin red line to next CP midpoint
+        # fetch the up‐to‐date distance & bearing
+        dist, angle = managers[0].get_next_checkpoint_info(cars[0])
+
+        mx = cars[0].x + dist * math.cos(cars[0].yaw + angle)
+        my = cars[0].y + dist * math.sin(cars[0].yaw + angle)
+        pygame.draw.line(screen, (255,0,0), (cars[0].x, cars[0].y), (mx, my), 2)
+
+        """
+
+
+        # draw the UI & cars
         for idx, (mgr, c) in enumerate(zip(managers, cars)):
-            # stagger UIs down the left edge
+            # Move the label down a bit for each car
             y0 = 10 + idx * 110
             label = f"Car {idx+1}:"
             mgr.draw(screen, x_off=10, y_off=y0, label=label)
             c.draw(screen)
         
+
         pygame.display.flip()
         clock.tick(60)
 
 
-
 def main():
-    pygame.init()
-    screen = pygame.display.set_mode((800, 800))
+    global default_font, road_tiles, CAR_IMAGE_RAW
 
+    # 1) Initialize Pygame and font
+    pygame.init()
+    pygame.font.init()
+    default_font = pygame.font.Font(None, 32)
+
+    # 2) Open the window
+    screen = pygame.display.set_mode((800, 800))
     pygame.display.set_caption("Racing Game")
     clock = pygame.time.Clock()
 
+    # 3) Convert and slice your assets now that the display is initialized
+    sheet = _sheet_raw.convert_alpha()
+    road_tiles = [
+        sheet.subsurface(pygame.Rect(col * tile_w, row * tile_h, tile_w, tile_h)).copy()
+        for row in range(3) for col in range(3)
+    ]
+    CAR_IMAGE_RAW = _car_raw.convert_alpha()
+
+    # (optional) Debugging info
     print(f"Current working directory: {os.getcwd()}")
 
+    # 4) Enter your existing menu loop
     menu = Menu(screen)
 
     while True:
@@ -1266,21 +1471,29 @@ def main():
                             sys.exit()
                         elif result == "MENU":
                             menu = Menu(screen)
+
                     elif option == "Car Editor":
                         # Implement car editor
                         pass
+
                     elif option == "Load Game":
-                        #track_name = input("Enter track name to load: ")
-                        box = pygame.Rect(screen.get_width()//2 - 150, screen.get_height()//2 - 20, 300, 40)
-                        track_name = get_text_input(screen, "Enter track name to load: ", default_font, box)
+                        box = pygame.Rect(
+                            screen.get_width() // 2 - 150,
+                            screen.get_height() // 2 - 20,
+                            300, 40
+                        )
+                        track_name = get_text_input(
+                            screen, "Enter track name to load: ",
+                            default_font, box
+                        )
                         result = drive_car(screen, track_name)
                         if result == "QUIT":
                             pygame.quit()
                             sys.exit()
                         elif result == "MENU":
-                            # Reinitialize the menu with the original screen size
                             screen = pygame.display.set_mode((800, 800))
                             menu = Menu(screen)
+
                     elif option == "Quit":
                         pygame.quit()
                         sys.exit()
@@ -1289,6 +1502,6 @@ def main():
         pygame.display.flip()
         clock.tick(60)
 
+
 if __name__ == "__main__":
     main()
-
