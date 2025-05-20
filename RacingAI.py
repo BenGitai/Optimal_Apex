@@ -500,7 +500,7 @@ class Car:
         self.prev_x, self.prev_y, self.prev_yaw = x, y, self.yaw
 
             # in Car.__init__:
-        self.reverse_delay  = 0.5   # seconds to wait at zero before reversing
+        self.reverse_delay  = 0.2   # seconds to wait at zero before reversing
         self.time_since_stop = 0.0  # timer accumulator
 
     def accelerate(self):
@@ -573,23 +573,17 @@ class Car:
 
 
     def draw(self, screen):
-        # 1) scale the raw sprite to your car’s logical size
+        # choose a per‐car sprite if assigned, else fallback
+        base_sprite = getattr(self, 'sprite_raw', CAR_IMAGE_RAW)
+        # scale it to the car’s logical size
         sprite = pygame.transform.scale(
-            CAR_IMAGE_RAW,
+            base_sprite,
             (int(self.width), int(self.height))
         )
-
-        # 2) rotate around its center
+        # rotate around center
         rotated = pygame.transform.rotate(sprite, self.angle)
-
-        # 3) get its rect and center it at (self.x, self.y)
-        rect = rotated.get_rect(center=(self.x, self.y))
-
-        # 4) blit to the screen
+        rect    = rotated.get_rect(center=(self.x, self.y))
         screen.blit(rotated, rect.topleft)
-
-        # draw your collision listeners as before
-        #self.collision_detector.draw_debug(screen)
 
     def handle_collision(self):
         # go back to last good state and stop
@@ -841,28 +835,38 @@ class RaceManager:
                 self.current_cp_idx = 0
                 print(f"Lap {self.lap_count} complete: {lap_duration:.2f}s")
 
-    def draw(self, screen):
-        """Call this before drawing the car."""
-        # Lap count
-        lap_surf = self.font.render(f"Lap: {self.lap_count}", True, (0,0,0))
-        screen.blit(lap_surf, (10, 10))
+    def draw(self, screen, x_off=10, y_off=10, label=None):
+        """
+        Draw the lap UI at (x_off, y_off). 
+        If label is provided, it prefixes the lap display.
+        """
+        line_h = 30  # vertical spacing
 
-        # Current lap timer
-        now  = pygame.time.get_ticks() / 1000.0
-        curr = now - self.lap_start
+        # 1) Lap count (with optional label)
+        if label:
+            title = f"{label} Lap: {self.lap_count}"
+        else:
+            title = f"Lap: {self.lap_count}"
+        lap_surf = self.font.render(title, True, (0,0,0))
+        screen.blit(lap_surf, (x_off, y_off))
+
+        # 2) Current lap timer
+        now   = pygame.time.get_ticks() / 1000.0
+        curr  = now - self.lap_start
         curr_surf = self.font.render(f"Current: {curr:.2f}s", True, (0,0,0))
-        screen.blit(curr_surf, (10, 40))
+        screen.blit(curr_surf, (x_off, y_off + line_h))
 
-        # Last lap time
+        # 3) Last lap time
         if self.lap_times:
             last = self.lap_times[-1]
             last_surf = self.font.render(f"Last: {last:.2f}s", True, (0,0,0))
-            screen.blit(last_surf, (10, 70))
+            screen.blit(last_surf, (x_off, y_off + line_h * 2))
 
-        # Best lap time
+        # 4) Best lap time
         if self.best_lap is not None:
             best_surf = self.font.render(f"Best: {self.best_lap:.2f}s", True, (0,0,0))
-            screen.blit(best_surf, (10, 100))
+            screen.blit(best_surf, (x_off, y_off + line_h * 3))
+
 
     @staticmethod
     def _crossed(p0, p1, a, b):
@@ -879,6 +883,53 @@ class RaceManager:
         side1 = (x1 - ax) * (by - ay) - (y1 - ay) * (bx - ax)
 
         return side0 * side1 < 0
+
+class Controller:
+    def get_actions(self, car, keys=None):
+        # returns (throttle, brake_input, steer_target)
+        raise NotImplementedError
+    
+class KeyboardController(Controller):
+    def __init__(self, scheme):
+        self.scheme          = scheme
+        self.time_since_stop = 0.0
+
+    def get_actions(self, car, keys, dt):
+        up    = self.scheme['up']
+        down  = self.scheme['down']
+        left  = self.scheme['left']
+        right = self.scheme['right']
+
+        # —— reverse-delay timer ——
+        if keys[down] and car.velocity <= 0:
+            self.time_since_stop += dt
+        else:
+            self.time_since_stop = 0.0
+
+        # —— throttle / brake / reverse ——
+        if keys[up]:
+            throttle, brake_input =  1.0, 0.0
+
+        elif keys[down]:
+            if car.velocity > 0:
+                throttle, brake_input =  0.0, 1.0
+            elif self.time_since_stop >= car.reverse_delay:
+                throttle, brake_input = -1.0, 0.0
+            else:
+                throttle, brake_input =  0.0, 0.0
+
+        else:
+            throttle, brake_input =  0.0, 0.0
+
+        # —— steering ——
+        if keys[left]:
+            steer_target =  car.max_steer
+        elif keys[right]:
+            steer_target = -car.max_steer
+        else:
+            steer_target =  0.0
+
+        return throttle, brake_input, steer_target
 
 
 class Menu:
@@ -906,18 +957,78 @@ class Menu:
                 return self.options[self.selected]
         return None
 
+def compute_spawns(spawn_cell, num, collide, track):
+    cx, cy = spawn_cell
+    bs = track.block_size
+    center_x = cx * bs + bs/2
+    center_y = cy * bs + bs/2
+
+    # figure out track forward direction from finish_line
+    fx1, fy1 = track.finish_line[0]
+    fx2, fy2 = track.finish_line[1]
+    vertical = (fy1 == fy2)
+    # sign = +1 means “away from finish”, −1 “toward finish”
+    if vertical:
+        sign = 1 if cy > fy1 else -1
+    else:
+        sign = 1 if cx > fx1 else -1
+
+    spawns = []
+    if not collide:
+        # all cars stack on the spawn tile
+        spawns = [(center_x, center_y)] * num
+    else:
+        offset = bs * 0.25  # quarter‐block corner offset
+        for i in range(num):
+            layer  = i // 2      # 0 = inner row, 1 = one back, 2 = two back, ...
+            corner = i %  2      # 0 = +xy corner, 1 = −xy corner
+
+            # start with corner offset
+            dx =  offset if corner == 0 else -offset
+            dy =  offset if corner == 0 else -offset
+
+            # then push back by `layer` full blocks
+            behind = layer * bs * sign
+            if vertical:
+                dy += behind
+            else:
+                dx += behind
+
+            spawns.append((center_x + dx, center_y + dy))
+
+    return spawns
+
+
 def drive_car(screen, track_name):
     track = Track(track_name)
     if not track.blocks:  # If no blocks were loaded, return to menu
         print("Failed to load track. Returning to menu.")
         return "MENU"
+    
+    # right after you load the track and before setting screen_size…
 
     screen_size = track.get_screen_size()
     screen = pygame.display.set_mode(screen_size)  # Resize the screen
     
+    pygame.font.init()
+    default_font = pygame.font.Font(None, 32)
+    # ask how many cars
+
+    box = pygame.Rect(screen.get_width()//2-150, screen.get_height()//2-20, 300, 40)
+    num = int(get_text_input(screen, "Number of cars: ", default_font, box))
+    num_cars = max(1, min(num, 10))   # clamp between 1 and 10
+
+    # ask if cars should collide
+    box = pygame.Rect(screen.get_width()//2-150, screen.get_height()//2-20, 300, 40)
+    txt = get_text_input(screen, "Car collisions? (y/n): ", default_font, box)
+    collide_cars = txt.strip().lower().startswith('y')
+    
     car_width, car_height = track.get_car_size()
 
     # Place the car at the spawn point on the screen
+
+    """ Old Spawn Point Code
+
     if hasattr(track, 'spawn_point') and track.spawn_point:
         gx, gy = track.spawn_point
         car_x = gx * track.block_size + track.block_size / 2 - car_width / 2
@@ -925,12 +1036,47 @@ def drive_car(screen, track_name):
     else:
         car_x = (screen_size[0] - car_width) / 2
         car_y = (screen_size[1] - car_height) / 2
+        """
 
-    
-    car = Car(car_x, car_y, car_width, car_height)
+    # New Spawn Point Code
+    spawns = compute_spawns(track.spawn_point, num_cars, collide_cars, track)
+    cars   = [Car(x, y, car_width, car_height) for x,y in spawns]
+
+    # load up to 8 car‐color sprites
+    car_sprite_images = []
+    for i in range(8):
+        path = os.path.join(ASSETS_DIR, f"Car{i+1}.png")
+        img  = pygame.image.load(path).convert_alpha()
+        car_sprite_images.append(img)
+
+    # now assign each Car instance its own raw sprite
+    for idx, c in enumerate(cars):
+        # pick the i-th sprite cycling through the 8
+        raw_img = car_sprite_images[idx % len(car_sprite_images)]
+        c.sprite_raw = raw_img
 
     default_font = pygame.font.Font(None, 32)
-    manager = RaceManager(track, default_font)
+    managers = [RaceManager(track, default_font) for _ in cars]
+
+        # for each human‐driven car, give it a KeyboardController
+            
+        # simple keyboard mappings for up to 4 humans
+    control_schemes = [
+        {'up': pygame.K_UP,    'down': pygame.K_DOWN,
+        'left': pygame.K_LEFT,'right': pygame.K_RIGHT},
+        {'up': pygame.K_w,     'down': pygame.K_s,
+        'left': pygame.K_a,   'right': pygame.K_d},
+        {'up': pygame.K_t,     'down': pygame.K_g,
+        'left': pygame.K_f,   'right': pygame.K_h},
+        {'up': pygame.K_i,     'down': pygame.K_k,
+        'left': pygame.K_j,   'right': pygame.K_l},
+    ]
+    # for more cars you can recycle schemes or leave them unresponsive (for AI later)
+
+    controllers = [
+        KeyboardController(control_schemes[i % len(control_schemes)])
+        for i in range(len(cars))
+    ]
 
     clock = pygame.time.Clock()
     
@@ -948,46 +1094,6 @@ def drive_car(screen, track_name):
 
         # throttle & brake as normalized inputs
         keys = pygame.key.get_pressed()
-
-        # —— Reverse‐delay timer ——
-        if keys[pygame.K_DOWN] and car.velocity <= 0:
-            car.time_since_stop += dt
-        else:
-            car.time_since_stop = 0.0
-
-        # —— Throttle / Brake / Reverse logic ——
-        if keys[pygame.K_UP]:
-            car.throttle    = 1.0
-            car.brake_input = 0.0
-
-        elif keys[pygame.K_DOWN]:
-            if car.velocity > 0:
-                # braking while moving forward
-                car.throttle    = 0.0
-                car.brake_input = 1.0
-            elif car.time_since_stop >= car.reverse_delay:
-                # only go into reverse after delay
-                car.throttle    = -1.0
-                car.brake_input = 0.0
-            else:
-                # stopped but still within delay → no input
-                car.throttle    = 0.0
-                car.brake_input = 0.0
-
-        else:
-            # neither key → reset inputs
-            car.throttle    = 0.0
-            car.brake_input = 0.0
-
-
-        # steering target remains the same
-        if keys[pygame.K_LEFT]:
-            car.steer_target =  car.max_steer
-        elif keys[pygame.K_RIGHT]:
-            car.steer_target = -car.max_steer
-        else:
-            car.steer_target =  0.0
-
 
         # update with real physics
         # 1) advance the car
@@ -1014,47 +1120,79 @@ def drive_car(screen, track_name):
 
         # determine how many sub-steps so max move per step is ≤ half a cell
         max_dist = track.block_size * 0.05
-        num_steps = max(1, int(abs(car.velocity * dt) / max_dist) + 1)
+        num_steps = max(1, int(abs(100 * dt) / max_dist) + 1)
         sub_dt = dt / num_steps
 
         for _ in range(num_steps):
             # advance by a fraction of dt
-            car.update(sub_dt)
+            # update each car’s physics & sensors
+            for idx, (mgr, c) in enumerate(zip(managers, cars)):
+                # 1) get human or AI inputs
+                thr, brk, steer = controllers[idx].get_actions(c, keys, sub_dt)
+                c.throttle     = thr
+                c.brake_input  = brk
+                c.steer_target = steer
 
-            # sample sensors
-            positions = car.collision_detector.get_listener_positions()
-            colors = {}
-            for name, x, y in positions:
-                x = max(0, min(x, screen.get_width()-1))
-                y = max(0, min(y, screen.get_height()-1))
-                colors[name] = track_surface.get_at((x, y))
-            car.collision_detector.update_colors(colors)
+                # 2) update the car’s physics
+                c.update(sub_dt)
 
-            # wall → crash
-            if car.collision_detector.check_wall_collision(colors):
-                car.handle_collision()
-                break
+                # sample sensors
+                positions = c.collision_detector.get_listener_positions()
+                colors = {}
+                for name, x, y in positions:
+                    x = max(0, min(x, screen.get_width()-1))
+                    y = max(0, min(y, screen.get_height()-1))
+                    colors[name] = track_surface.get_at((x, y))
+                c.collision_detector.update_colors(colors)
 
-            # wheel on grass → off-track friction
-            if car.collision_detector.any_wheel_offtrack(colors):
-                car.Crr = car.Crr_offtrack
-            else:
-                car.Crr = car.Crr_normal
+                # wall → crash
+                if c.collision_detector.check_wall_collision(colors):
+                    c.handle_collision()
+                    break
+
+                # wheel on grass → off-track friction
+                if c.collision_detector.any_wheel_offtrack(colors):
+                    c.Crr = c.Crr_offtrack
+                else:
+                    c.Crr = c.Crr_normal
 
 
-            # — after screen = pygame.display.set_mode(screen_size) —
+                # — after screen = pygame.display.set_mode(screen_size) —
 
-            # update lap logic
-            manager.update(car)
+                pygame.font.init()
+                default_font = pygame.font.Font(None, 32)
+
+                # 3) update lap logic
+                mgr.update(c)
+
+
+            if collide_cars:
+                for i in range(len(cars)):
+                    for j in range(i+1, len(cars)):
+                        # simple AABB based on width/height
+                        r1 = pygame.Rect(
+                            cars[i].x - cars[i].width/2,
+                            cars[i].y - cars[i].height/2,
+                            cars[i].width, cars[i].height
+                        )
+                        r2 = pygame.Rect(
+                            cars[j].x - cars[j].width/2,
+                            cars[j].y - cars[j].height/2,
+                            cars[j].width, cars[j].height
+                        )
+                        if r1.colliderect(r2):
+                            cars[i].handle_collision()
+                            cars[j].handle_collision()
 
         # show the pre-rendered track + lines
         screen.blit(track_surface, (0, 0))
 
-        # draw the lap/timer UI
-        manager.draw(screen)
-
-        # draw the car on top
-        car.draw(screen)
+        for idx, (mgr, c) in enumerate(zip(managers, cars)):
+            # stagger UIs down the left edge
+            y0 = 10 + idx * 110
+            label = f"Car {idx+1}:"
+            mgr.draw(screen, x_off=10, y_off=y0, label=label)
+            c.draw(screen)
         
         pygame.display.flip()
         clock.tick(60)
