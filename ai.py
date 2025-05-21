@@ -2,6 +2,7 @@
 
 import random, math, pygame, os
 from RacingAI import Track, Car, RaceManager, ASSETS_DIR
+import json
 
 # ─── Genome & Neural Net ──────────────────────────────────────────────────
 
@@ -14,6 +15,23 @@ class Genome:
         for i in range(len(self.weights)):
             if random.random() < rate:
                 self.weights[i] += random.uniform(-scale, scale)
+
+    def save(self, path):
+        """Serialize this genome’s weight list to a JSON file."""
+        with open(path, 'w') as f:
+            json.dump(self.weights, f)
+
+    @classmethod
+    def load(cls, path):
+        """
+        Load a genome from a JSON file previously written by `save`.
+        Returns a new Genome with its `.weights` set to the file’s data.
+        """
+        with open(path, 'r') as f:
+            weights = json.load(f)
+        g = cls(len(weights))
+        g.weights = weights
+        return g
 
     @staticmethod
     def crossover(a, b):

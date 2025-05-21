@@ -37,4 +37,8 @@ if __name__ == "__main__":
         pop_size=20,
         generations=10
     )
+
+    champ.save("best_genome.json")
+    print("Saved best genome to best_genome.json")
+
     print("Done training; final champion ready.")

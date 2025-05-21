@@ -120,6 +120,7 @@ def main_visual_ga(track_name="test",
             lap_t = sum(mgr.lap_times) if mgr.lap_times else generation_time
             fitness = mgr.lap_count*1000.0 - lap_t
             scored.append((genome, fitness))
+            print(f"Genome {genome} scored {fitness:.1f}ms")
         ga.evolve(scored)
 
 if __name__ == "__main__":
