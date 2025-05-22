@@ -2,8 +2,10 @@ import pygame, sys, os, math, random
 from RacingAI import Track, Car, compute_spawns, ASSETS_DIR
 from RacingAI import default_font as _unused  # ensure font code is present
 from RacingAI import RaceManager
+from RacingAI import get_text_input, default_font  # for the popup prompt :contentReference[oaicite:1]{index=1}
 import RacingAI
 import numpy as np
+import pickle
 
 import neat
 from neat.nn import FeedForwardNetwork
@@ -75,18 +77,18 @@ def main_visual_ga(track_name="test",
             controllers.append(net)
 
         # — initialize shaped‐reward bookkeeping —
-        crash_penalty     = 50.0
-        idle_penalty_rate = 10.0     # per second idling
-        proximity_scale   = 200.0    # per‐pixel reduction → reward
-        max_idle_speed    = 0.1      # below this, we call “idle”
-        lap_bonus         = 1000.0
-        HEADING_SCALE    = 100.0    # tune this
+        crash_penalty     = 200.0
+        idle_penalty_rate = 0.001     # per second idling
+        proximity_scale   = 600.0    # per‐pixel reduction → reward
+        max_idle_speed    = 0.2      # below this, we call “idle”
+        lap_bonus         = 500000.0
+        HEADING_SCALE    = 1.0    # tune this
         SPEED_SCALE      = 20.0
         WALL_THRESH      = track.block_size * 0.3
         WALL_SCALE       = 200.0
-        CHECKPOINT_BONUS = 200.0
-        STEER_PENALTY = 5.0   # per radian per second
-        STRAIGHT_BONUS = 10
+        CHECKPOINT_BONUS = 200000.0
+        STEER_PENALTY = 20.0   # per radian per second
+        STRAIGHT_BONUS = 0
 
 
         fitness_scores = [0.0] * len(genome_list)
@@ -109,6 +111,37 @@ def main_visual_ga(track_name="test",
                 if ev.type == pygame.QUIT:
                     pygame.quit()
                     sys.exit()
+                elif ev.type == pygame.KEYDOWN:
+                    if ev.key == pygame.K_s:
+                        # Prompt for save filename
+                        box = pygame.Rect(screen.get_width()//2 - 150,
+                                        screen.get_height()//2 - 20,
+                                        300, 40)
+                        fname = get_text_input(screen, "Enter save file name: ",
+                                            default_font, box)
+                        if fname:
+                            path = fname + '.pkl'
+                            with open(path, 'wb') as f:
+                                pickle.dump(pop, f)
+                            print(f"Saved population to '{path}'")
+
+                    elif ev.key == pygame.K_l:
+                        # Prompt for load filename
+                        box = pygame.Rect(screen.get_width()//2 - 150,
+                                        screen.get_height()//2 - 20,
+                                        300, 40)
+                        fname = get_text_input(screen, "Enter load file name: ",
+                                            default_font, box)
+                        if fname:
+                            path = fname + '.pkl'
+                            try:
+                                with open(path, 'rb') as f:
+                                    pop = pickle.load(f)
+                                print(f"Loaded population from '{path}'")
+                            except FileNotFoundError:
+                                print(f"No saved population found at '{path}'")
+
+                            print("!! No population.pkl found")
 
             # redraw track + lines into an offscreen surface
             track_surf = pygame.Surface((sx, sy))
@@ -141,17 +174,16 @@ def main_visual_ga(track_name="test",
 
                 thr   = max(0.0, out[0])
                 brk   = max(0.0, -out[1])
+                steer = 0
 
-                # dead‐zone steering
-                raw_s = out[2]
-                DEAD_ZONE = 0.1    # tune between 0.0 and 1.0
-                if (-DEAD_ZONE < abs(raw_s) < DEAD_ZONE):
-                    steer = 0.0
-                else:
-                    # re‐scale so you still can hit full lock
-                    steer = (raw_s - math.copysign(DEAD_ZONE, raw_s)) / (1.0 - DEAD_ZONE)
-                steer = steer * car.max_steer
+                steer_left_bool = out[2] > 0.5
+                steer_right_bool = out[3] > 0.5
 
+                if steer_left_bool:
+                    steer += out[4] * car.max_steer
+                if steer_right_bool:
+                    steer -= out[5] * car.max_steer
+                    
 
                 car.throttle, car.brake_input, car.steer_target = thr, brk, steer
                 car.update(dt)
@@ -192,7 +224,7 @@ def main_visual_ga(track_name="test",
 
 
                 # 5) heading‐alignment bonus
-                import numpy as np
+
                 # get unit heading vector
                 heading_vec = np.array([math.cos(car.yaw), math.sin(car.yaw)])
                 # get vector along the track between current and next CP
@@ -230,8 +262,11 @@ def main_visual_ga(track_name="test",
                 # update last_positions if you need them elsewhere
                 last_positions[idx] = (car.x, car.y)
 
+            # — generation idle check —
+            if all(abs(car.velocity) < max_idle_speed for car in cars):
+                print(">> All cars idle—ending generation early")
+                break
                 
-
             # draw everything
             screen.blit(track_surf, (0,0))
             for idx, car in enumerate(cars):
@@ -242,6 +277,17 @@ def main_visual_ga(track_name="test",
                 f"Gen {generation}  Time {elapsed:.1f}/{generation_time}s", True, (0,0,0)
             )
             screen.blit(txt, (10,10))
+
+            save_txt = font.render(
+                f"S to save", True, (0,0,0)
+            )
+            screen.blit(save_txt, (10,30))
+
+            load_txt = font.render(
+                f"L to load", True, (0,0,0)
+            )
+            screen.blit(load_txt, (10,50))
+
             pygame.display.flip()
 
         # assign fitness back onto each genome
@@ -260,4 +306,4 @@ def main_visual_ga(track_name="test",
 
 
 if __name__ == "__main__":
-    main_visual_ga("test", pop_size=30, generation_time=5, fps=60)
+    main_visual_ga("test", pop_size=30, generation_time=10, fps=60)
