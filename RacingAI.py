@@ -511,17 +511,17 @@ class Car:
         self.angle = 0
         self.speed = 0
         self.max_speed = 5
-        self.acceleration = 0.1
-        self.deceleration = 0.05
-        self.turn_speed = 3
+        self.acceleration = 0.05
+        self.deceleration = self.acceleration * 2
+        self.turn_speed = 4
         self.collision_detector = CarCollisionDetector(self)
         self.color = (255, 0, 0)  # Red car
 
         # physics parameters (tweak to taste)
         self.wheel_base = 50          # distance between axles in pixels
         self.max_steer = math.radians(30)  # max front‐wheel angle (±30°)
-        self.steer_speed = math.radians(200)  # how fast you turn the wheels (rad/sec)
-        self.mass = 1200             # mass in arbitrary units
+        self.steer_speed = math.radians(240)  # how fast you turn the wheels (rad/sec)
+        self.mass = 1000             # mass in arbitrary units
         self.Cd = 0.425              # drag coefficient
         self.Crr = 2000              # rolling resistance coeff
         self.Crr_normal = self.Crr
@@ -956,7 +956,7 @@ class RaceManager:
             best_surf = self.font.render(f"Best: {self.best_lap:.2f}s", True, (0,0,0))
             screen.blit(best_surf, (x_off, y_off + line_h * 3))
 
-    def get_next_checkpoint_info(self, car):
+    def get_next_checkpoint_info(self, car: Car):
         """
         Returns (distance, relative_angle) to the next objective:
          - if there are remaining checkpoint_lines, use the midpoint of the current one;
@@ -1055,6 +1055,80 @@ class KeyboardController(Controller):
 
         return throttle, brake_input, steer_target
 
+class HeuristicController:
+    """
+    A rule-based controller that drives using LIDAR and checkpoint info.
+    """
+    def __init__(self, track: Track, manager: RaceManager, track_surface=None, car = None):
+        self.track = track
+        self.manager = manager
+        self.track_surface = track_surface
+        self.car = car
+        # LIDAR settings  
+        self.num_rays = 11
+        self.fov = math.pi * 1
+        self.max_dist = None  # will be set based on car width
+        self.step = 4
+        # Steering deadzone
+        self.dead_zone = 0.2
+
+    def get_actions(self, car: Car, keys=None, dt: float = 0.0):
+        if self.max_dist is None:
+            self.max_dist     = car.width * 10
+            self.block_thresh = 0.75
+            # crash threshold: if you get closer than this, back up
+            self.crash_thresh = 0.15
+
+        # 1) Sense environment
+        rays = car.get_lidar(
+            self.track_surface,
+            num_rays=self.num_rays,
+            fov=self.fov,
+            max_dist=self.max_dist,
+            step=self.step
+        )
+        center_idx   = self.num_rays // 2
+        forward_dist = rays[center_idx]
+
+        #for ray in rays:
+        #    print(f"Ray distance: {ray:.2f}")
+
+        # 2) Steering (unchanged)
+        dist_to_cp, ang_to_cp = self.manager.get_next_checkpoint_info(car)
+        left_clear  = sum(rays[:center_idx])
+        right_clear = sum(rays[center_idx+1:])
+
+        if forward_dist < self.block_thresh:
+            steer_cmd = -car.max_steer if right_clear > left_clear else car.max_steer
+        else:
+            desired = max(-car.max_steer, min(car.max_steer, ang_to_cp))
+            if abs(desired) < self.dead_zone:
+                steer_cmd = 0.0
+            elif desired > 0:
+                steer_cmd = desired if left_clear  >= self.block_thresh else -car.max_steer
+            else:
+                steer_cmd = desired if right_clear >= self.block_thresh else  car.max_steer
+
+        game_clock = pygame.time.Clock()
+
+        # 3) Throttle / Brake with instant reverse on “crash”
+        if (forward_dist < self.crash_thresh) or ((car.velocity == 0) and (game_clock.get_time() < 100)):
+            # we’re too close → back up
+            print("Collision detected! Reversing...")
+            throttle = -1.0
+            steer_cmd = -steer_cmd
+            brake    =  0.0
+        else:
+            # otherwise floor it whenever you can, else half‐speed
+            if forward_dist > self.block_thresh:
+                throttle = 1.0
+            else:
+                #print("Obstacle detected! Slowing down...")
+                throttle = 0.7
+            brake = 0.0
+
+        return throttle, brake, steer_cmd
+
 
 class Menu:
     def __init__(self, screen):
@@ -1129,6 +1203,8 @@ def compute_spawns(spawn_cell, num, collide, track):
 
 
 def drive_car(screen, track_name):
+    #from rule_based_driver import HeuristicController
+
     track = Track(track_name)
     if not track.blocks:  # If no blocks were loaded, return to menu
         print("Failed to load track. Returning to menu.")
@@ -1139,6 +1215,10 @@ def drive_car(screen, track_name):
     screen_size = track.get_screen_size()
     screen = pygame.display.set_mode(screen_size)  # Resize the screen
     
+    track_surface = pygame.Surface(screen_size)
+    track_surface.fill((0, 200, 0))
+    track.draw(track_surface)
+
     pygame.font.init()
     default_font = pygame.font.Font(None, 32)
     # ask how many cars
@@ -1176,6 +1256,8 @@ def drive_car(screen, track_name):
     spawns = compute_spawns(track.spawn_point, num_cars, collide_cars, track)
     cars   = [Car(x, y, car_width, car_height) for x,y in spawns]
 
+    managers = [RaceManager(track, default_font) for _ in cars]
+
     # load up to 8 car‐color sprites
     car_sprite_images = []
     for i in range(8):
@@ -1189,11 +1271,10 @@ def drive_car(screen, track_name):
         raw_img = car_sprite_images[idx % len(car_sprite_images)]
         c.sprite_raw = raw_img
 
-    default_font = pygame.font.Font(None, 32)
     managers = [RaceManager(track, default_font) for _ in cars]
 
         # for each human‐driven car, give it a KeyboardController
-            
+    controllers = []
         # simple keyboard mappings for up to 4 humans
     control_schemes = [
         {'up': pygame.K_UP,    'down': pygame.K_DOWN,
@@ -1207,30 +1288,31 @@ def drive_car(screen, track_name):
     ]
     # for more cars you can recycle schemes or leave them unresponsive (for AI later)
 
-    # now that RacingAI is fully defined, import the AIController
-    from ai import AIController
-
-    # then later, when building controllers:
-    controllers = []
     # create human controllers first
     for i in range(human_count):
         scheme = control_schemes[i % len(control_schemes)]
         controllers.append(KeyboardController(scheme))
-    # then AI controllers
+
+    # then AI controllers 
     for i in range(ai_count):
-        ai_ctrl = AIController(track, managers[human_count + i])
-        # ai_ctrl.track_surface = track_surface
-        controllers.append(ai_ctrl)
+        controller = HeuristicController(
+            track=track,
+            manager=managers[i + human_count],
+            track_surface=track_surface,
+            car=cars[i + human_count]
+        )
+        controllers.append(controller)
 
     for idx in range(len(cars)):
-        if idx < 2:  # first two are humans
+        if idx < human_count:  # first two are humans
             scheme = control_schemes[idx % len(control_schemes)]
             controllers.append(KeyboardController(scheme))
         else:
             # create an AI controller, and give it the pre‐rendered track surface
-            ai_ctrl = AIController(track, managers[idx])
-            # ai_ctrl.track_surface = track_surface
-            controllers.append(ai_ctrl)
+            controllers.append(
+                HeuristicController(track, RaceManager, track, car=cars[idx])
+            )
+            print(f"AI Controller {controllers[idx]} created for car {idx}")
 
 
     clock = pygame.time.Clock()

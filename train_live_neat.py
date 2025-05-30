@@ -53,6 +53,9 @@ def main_visual_ga(track_name="test",
 
 
     generation = 0
+
+    load_requested = False
+
     while True:
         generation += 1
         print(f"Generation {generation}")
@@ -77,26 +80,35 @@ def main_visual_ga(track_name="test",
             controllers.append(net)
 
         # — initialize shaped‐reward bookkeeping —
-        crash_penalty     = 200.0
-        idle_penalty_rate = 0.001     # per second idling
+        crash_penalty     = 0
+        idle_penalty_rate = 0     # per second idling
         proximity_scale   = 600.0    # per‐pixel reduction → reward
         max_idle_speed    = 0.2      # below this, we call “idle”
         lap_bonus         = 500000.0
-        HEADING_SCALE    = 1.0    # tune this
-        SPEED_SCALE      = 20.0
+        HEADING_SCALE    = 0    # tune this
+        SPEED_SCALE      = 2
         WALL_THRESH      = track.block_size * 0.3
         WALL_SCALE       = 200.0
         CHECKPOINT_BONUS = 200000.0
-        STEER_PENALTY = 20.0   # per radian per second
-        STRAIGHT_BONUS = 0
+        STEER_PENALTY = 0   # per radian per second
+        STRAIGHT_BONUS = 0.0
+
+        # how close is “too close” to the wall
+        WARNING_DIST      = track.block_size * 2
+        TURN_AWAY_REWARD  = 50.0
+        TURN_AWAY_PENALTY = 25.0
+
 
 
         fitness_scores = [0.0] * len(genome_list)
         prev_dists     = []
         # record initial distance to next checkpoint for each car
         for car, mgr in zip(cars, managers):
+            print(f"Manager {mgr} for car {car}")
             d, _ = mgr.get_next_checkpoint_info(car)
             prev_dists.append(d)
+        
+        crashed        = [False] * len(genome_list)
 
         # — extra bookkeeping —
         last_cp_idxs = [mgr.current_cp_idx for mgr in managers]
@@ -118,7 +130,7 @@ def main_visual_ga(track_name="test",
                                         screen.get_height()//2 - 20,
                                         300, 40)
                         fname = get_text_input(screen, "Enter save file name: ",
-                                            default_font, box)
+                                            font, box)
                         if fname:
                             path = fname + '.pkl'
                             with open(path, 'wb') as f:
@@ -131,17 +143,22 @@ def main_visual_ga(track_name="test",
                                         screen.get_height()//2 - 20,
                                         300, 40)
                         fname = get_text_input(screen, "Enter load file name: ",
-                                            default_font, box)
+                                            font, box)
                         if fname:
                             path = fname + '.pkl'
                             try:
                                 with open(path, 'rb') as f:
                                     pop = pickle.load(f)
                                 print(f"Loaded population from '{path}'")
+                                load_requested = True
+                                break
                             except FileNotFoundError:
                                 print(f"No saved population found at '{path}'")
 
                             print("!! No population.pkl found")
+            
+            if load_requested:
+                break
 
             # redraw track + lines into an offscreen surface
             track_surf = pygame.Surface((sx, sy))
@@ -160,20 +177,28 @@ def main_visual_ga(track_name="test",
 
             # update each car
             for idx, (car, ctrl, mgr) in enumerate(zip(cars, controllers, managers)):
+                # Skip if this car has crashed
+                if crashed[idx]:
+                    continue
                 # sense & act
                 ctrl.track_surface = track_surf
 
                 # `ctrl` is now a FeedForwardNetwork
                 # build the NN inputs exactly as before:
-                rays = car.get_lidar(track_surf, num_rays=7,
-                                     fov=math.pi*0.75,
-                                     max_dist=car.width*10, step=4)
+                rays = car.get_lidar(track_surf, num_rays=11,
+                                     fov=math.pi*1,
+                                     max_dist=car.width*10, step=2)
+                
+                offtrack = 1.0 if car.Crr != car.Crr_normal else 0.0
+
                 dist, ang = mgr.get_next_checkpoint_info(car)
                 inputs = rays + [car.velocity, dist, ang, car.steer]
                 out    = ctrl.activate(inputs)
 
                 thr   = max(0.0, out[0])
+                thr = min(thr, 1.0)  # clamp throttle to [0, 1]
                 brk   = max(0.0, -out[1])
+                brk = min(brk, 1.0)  # clamp brake to [0, 1]
                 steer = 0
 
                 steer_left_bool = out[2] > 0.5
@@ -186,6 +211,23 @@ def main_visual_ga(track_name="test",
                     
 
                 car.throttle, car.brake_input, car.steer_target = thr, brk, steer
+
+                # ── Wall‐avoidance bonus/penalty ──
+                # pick out left, center, right LIDAR beams
+                left_dist   = rays[0]
+                center_dist = rays[len(rays)//2]
+                right_dist  = rays[-1]
+
+                if center_dist < WARNING_DIST:
+                    # see which side has more room
+                    if left_dist > right_dist and steer_right_bool:
+                        fitness_scores[idx] += TURN_AWAY_REWARD * steer
+                    elif right_dist > left_dist and steer_left_bool:
+                        fitness_scores[idx] += TURN_AWAY_REWARD * steer
+                    else:
+                        fitness_scores[idx] -= TURN_AWAY_PENALTY
+
+
                 car.update(dt)
                 # collision sampling
                 cols = {}
@@ -196,6 +238,9 @@ def main_visual_ga(track_name="test",
                 car.collision_detector.update_colors(cols)
                 if car.collision_detector.check_wall_collision(cols):
                     car.handle_collision()
+                    fitness_scores[idx] -= crash_penalty
+                    crashed[idx] = True
+                    continue
                 elif car.collision_detector.any_wheel_offtrack(cols):
                     car.Crr = car.Crr_sand
                 else:
@@ -256,7 +301,7 @@ def main_visual_ga(track_name="test",
                     last_cp_idxs[idx] = mgr.current_cp_idx
                 
                 # 9) steering penalty
-                fitness_scores[idx] -= abs(car.steer_target) * STEER_PENALTY * dt
+                fitness_scores[idx] -= abs(steer) * STEER_PENALTY * dt
                 fitness_scores[idx] += (1.0 - abs(steer)) * STRAIGHT_BONUS * dt
 
                 # update last_positions if you need them elsewhere
@@ -269,10 +314,47 @@ def main_visual_ga(track_name="test",
                 
             # draw everything
             screen.blit(track_surf, (0,0))
-            for idx, car in enumerate(cars):
+            fov      = math.pi * 1
+            num_rays = 11
+            max_dist = car.width * 10
+            # draw numbered cars
+            for idx, car in enumerate(cars, start=1):
+                # render the genome index in red, just above the car
+                num_surf = font.render(str(idx), True, (255, 0, 0))
+                # position it centered on the car’s top
+                x, y = car.x, car.y
+                label_rect = num_surf.get_rect(center=(x, y - car.height/2 - 10))
+                screen.blit(num_surf, label_rect)
+
+                # now draw the car itself
                 car.draw(screen)
+                # draw the LIDAR rays
+                rays = car.get_lidar(
+                    track_surf,
+                    num_rays=num_rays,
+                    fov=fov,
+                    max_dist=max_dist
+                )
+
+                """
+                # draw each ray in green
+                for i, r in enumerate(rays):
+                    # angle of this ray
+                    ang = car.yaw + (-fov/2 + fov * i/(num_rays-1))
+                    # ray end point
+                    end_x = car.x + r * max_dist * math.cos(ang)
+                    end_y = car.y + r * max_dist * math.sin(ang)
+                    pygame.draw.line(
+                        screen,
+                        (0,255,0),
+                        (car.x, car.y),
+                        (end_x, end_y),
+                        1
+                    )
+                """
+
             # HUD: gen + timer
-            elapsed = (pygame.time.get_ticks() - start_ticks)/1000.0
+            elapsed = (pygame.time.get_ticks() - start_ticks)/10000.0
             txt = font.render(
                 f"Gen {generation}  Time {elapsed:.1f}/{generation_time}s", True, (0,0,0)
             )
@@ -289,6 +371,11 @@ def main_visual_ga(track_name="test",
             screen.blit(load_txt, (10,50))
 
             pygame.display.flip()
+        
+        if load_requested:
+            load_requested = False
+            print(">> Restarting generation with loaded population")
+            continue   # jump back to top of generation loop
 
         # assign fitness back onto each genome
         for i, (genome, mgr) in enumerate(zip(genome_list, managers)):
@@ -305,5 +392,11 @@ def main_visual_ga(track_name="test",
         pop.generation += 1
 
 
+
+
+
 if __name__ == "__main__":
-    main_visual_ga("test", pop_size=30, generation_time=10, fps=60)
+    track_name = input("Enter track name (default: 'test'): ")
+    if not track_name.strip():
+        track_name = "test"
+    main_visual_ga(track_name, pop_size=50, generation_time=10, fps=60)
