@@ -24,6 +24,8 @@ In all honesty, it works sometimes, but not amazingly. The values need to be twe
 
 The system uses NEAT (NeuroEvolution of Augmenting Topologies), which is an evolutionary genetic algorithm. The cofiguration file is config-feedfoward.ini, you can edit it as you see fit. Currently, it has 15 inputs (LIDAR, checpoint info, car info) and 6 ouputs (foward, backwards, yes or no turn, how much to turn) but this might not be optimal.
 
+You can learn more about NEAT here: [NEAT Documentation](https://neat-python.readthedocs.io/en/latest/index.html)
+
 The AI is based on simulated results which you can view. When running the program with the specified track, pygame will open a window and you will be able to watch in real time as the cars learn to drive. You can save and load neaural net files as they are being trained with S and L respectivly. These will be saved in the ai_saves folder.
 
 In its current state, there isn't the option to race the AI as the AI has not reached a stage that it would be fun to race against but the way it is designed makes it extreamly easy to add.
