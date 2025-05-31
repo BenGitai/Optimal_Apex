@@ -1,12 +1,12 @@
-## Algortims Final Project: Optimal Apex
+# Algortims Final Project: Optimal Apex
 
-# This is the code for my Algo final project, Optimal Apex
+## This is the code for my Algo final project, Optimal Apex
 
 Optimal Apex is the name of this game which has 2 main features/modes.
 
 This code is in python as it heavily utilizes pygame and NEAT, python specific libraries.
 
-# RacingAI.py:
+## RacingAI.py:
 
 The first is RacingAI.py which is the main file. In RacingAI, you can build tracks using the track editor by selecting which block you want, rotating it how you want, and then placing it. You can save these tracks and they will be stored in the tracks folder. You can then edit a track either by loading it in the track editor, or by directly going into the CSV file, which was designed to be as easy to read for a human as possible, and changing the meta data (usefull for removing elements completely).
 
@@ -16,7 +16,7 @@ The game is based on actual physics, the cars all have weights, friction, and po
 
 There is a computer you can play against that was manually created by me. It will avoid obsticles but is not particularly fast.
 
-# train_live_neat.py (AI)
+## train_live_neat.py (AI)
 
 The AI portion of the code is in the file train_live_neat.py.
 
