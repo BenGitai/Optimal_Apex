@@ -701,7 +701,8 @@ class Track:
     def load_track(self):
         try:
             file_name = f"{self.name}.csv" if not self.name.endswith('.csv') else self.name
-            full_path = os.path.abspath(file_name)
+            # full_path = os.path.abspath(file_name)
+            full_path = os.path.join((TRACK_DIR), file_name)
             print(f"Attempting to load track from: {full_path}")
 
             if not os.path.exists(full_path):

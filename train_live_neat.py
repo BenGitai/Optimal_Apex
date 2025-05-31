@@ -1,5 +1,5 @@
 import pygame, sys, os, math, random
-from RacingAI import Track, Car, compute_spawns, ASSETS_DIR
+from RacingAI import Track, Car, compute_spawns, ASSETS_DIR, TRACK_DIR
 from RacingAI import default_font as _unused  # ensure font code is present
 from RacingAI import RaceManager
 from RacingAI import get_text_input, default_font  # for the popup prompt :contentReference[oaicite:1]{index=1}
@@ -10,6 +10,8 @@ import pickle
 import neat
 from neat.nn import FeedForwardNetwork
 
+AI_SAVEPATH = os.path.join(os.path.dirname(__file__), 'ai_saves')
+
 def main_visual_ga(track_name="test",
                    pop_size=20,
                    generation_time=30.0,
@@ -19,7 +21,8 @@ def main_visual_ga(track_name="test",
     font = pygame.font.Font(None, 24)
 
     # load track + window
-    track = Track(track_name)
+    track_path = os.path.join(TRACK_DIR, f'{track_name}.csv')
+    track = Track(track_path)
     sx, sy = track.get_screen_size()
     screen = pygame.display.set_mode((sx, sy))
     pygame.display.set_caption("Live GA Training")
@@ -104,7 +107,7 @@ def main_visual_ga(track_name="test",
         prev_dists     = []
         # record initial distance to next checkpoint for each car
         for car, mgr in zip(cars, managers):
-            print(f"Manager {mgr} for car {car}")
+            # print(f"Manager {mgr} for car {car}")
             d, _ = mgr.get_next_checkpoint_info(car)
             prev_dists.append(d)
         
@@ -133,9 +136,10 @@ def main_visual_ga(track_name="test",
                                             font, box)
                         if fname:
                             path = fname + '.pkl'
-                            with open(path, 'wb') as f:
+                            full_path = os.path.join(AI_SAVEPATH, path)
+                            with open(full_path, 'wb') as f:
                                 pickle.dump(pop, f)
-                            print(f"Saved population to '{path}'")
+                            print(f"Saved population to '{full_path}'")
 
                     elif ev.key == pygame.K_l:
                         # Prompt for load filename
@@ -146,14 +150,15 @@ def main_visual_ga(track_name="test",
                                             font, box)
                         if fname:
                             path = fname + '.pkl'
+                            full_path = os.path.join(AI_SAVEPATH, path)
                             try:
-                                with open(path, 'rb') as f:
+                                with open(full_path, 'rb') as f:
                                     pop = pickle.load(f)
-                                print(f"Loaded population from '{path}'")
+                                print(f"Loaded population from '{full_path}'")
                                 load_requested = True
                                 break
                             except FileNotFoundError:
-                                print(f"No saved population found at '{path}'")
+                                print(f"No saved population found at '{full_path}'")
 
                             print("!! No population.pkl found")
             
