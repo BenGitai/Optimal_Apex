@@ -19,6 +19,8 @@ default_font = None
 ASSETS_DIR = os.path.join(os.path.dirname(__file__), 'assets')
 _sheet_raw = pygame.image.load(os.path.join(ASSETS_DIR, 'TrackPieces.png'))
 
+TRACK_DIR = os.path.join(os.path.dirname(__file__), 'tracks')
+
 # Coverting later to avoid loading issues
 # sheet   = _sheet_raw.convert_alpha()
 
@@ -438,6 +440,7 @@ class TrackEditor:
         #file_name = input("Enter file name: ")
         box = pygame.Rect(self.screen.get_width()//2 - 150, self.screen.get_height()//2 - 20, 300, 40)
         file_name = get_text_input(self.screen, "Enter file name: ", default_font, box)
+        file_name = os.path.join((TRACK_DIR), file_name)
         with open(file_name + '.csv', 'w', newline='') as file:
             writer = csv.writer(file)
             # Write the grid size as the first row
@@ -469,6 +472,7 @@ class TrackEditor:
         #file_name = input("Enter file name: ")
         box = pygame.Rect(self.screen.get_width()//2 - 150, self.screen.get_height()//2 - 20, 300, 40)
         file_name = get_text_input(self.screen, "Enter file name: ", default_font, box)
+        file_name = os.path.join((TRACK_DIR), file_name)
         if os.path.exists(file_name + '.csv'):
             with open(file_name + '.csv', 'r') as file:
                 reader = csv.reader(file)
